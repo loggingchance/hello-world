@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - '.github/workflows/corrim-merge.yml'
+  issues:
+    types: [opened]
 
 jobs:
   build:
