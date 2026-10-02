@@ -1,0 +1,117 @@
+name: Build CORRIM Phase I merged PDF
+
+on:
+  push:
+    paths:
+      - '.github/workflows/corrim-merge.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install merger
+        run: python -m pip install --quiet pypdf
+
+      - name: Download original CORRIM Phase I modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source out
+          get() {
+            name="$1"; url="$2"
+            echo "Downloading $name"
+            curl -L --fail --retry 4 --retry-delay 2 --connect-timeout 30 --max-time 300 \
+              -A "Mozilla/5.0" -o "source/$name.pdf" "$url"
+            test "$(stat -c%s "source/$name.pdf")" -gt 10000
+            head -c 4 "source/$name.pdf" | grep -q '%PDF'
+          }
+          get A "https://corrim.org/wp-content/uploads/2018/03/forest-resources-pnw-and-se.pdf"
+          get B "https://corrim.org/wp-content/uploads/2018/03/softwood-lumber-pnw.pdf"
+          get C "https://corrim.org/wp-content/uploads/2018/03/softwood-lumber-se.pdf"
+          if ! get D "https://corrim.org/wp-content/uploads/2018/03/softwood-plywood-manufacturing-us.pdf"; then
+            get D "https://corrim.org/wp-content/uploads/2020/06/Module-D-Plywood_Final_Jan-28.pdf"
+          fi
+          get E "https://corrim.org/wp-content/uploads/2018/03/oriented-strandboard-us.pdf"
+          get F "https://corrim.org/wp-content/uploads/2018/03/composite-i-joists-pnw-and-se.pdf"
+          get G "https://corrim.org/wp-content/uploads/2018/03/glued-laminated-timbers-pnw-and-se.pdf"
+          get H "https://corrim.org/wp-content/uploads/2018/03/laminated-veneer-lumber-pnw-and-se.pdf"
+          get I "https://corrim.org/wp-content/uploads/2018/03/design-of-residential-building-shells-minneapolis-atlanta.pdf"
+          get J "https://corrim.org/wp-content/uploads/2018/03/environmental-impacts-single-family-building-shell-harvest-to-construction.pdf"
+          get KLM "https://corrim.org/wp-content/uploads/2018/03/energy-consumption-greenhouse-gas-emissions-related-to-use-maintenance-and-disposal-of-a-residential-structure.pdf"
+          get N "https://corrim.org/wp-content/uploads/2018/03/tracking-carbon-from-sequestration-in-the-forest-to-wood-products-and-substitution.pdf"
+          get O "https://corrim.org/wp-content/uploads/2018/03/environmental-performance-index-for-the-forest.pdf"
+
+      - name: Merge and add module bookmarks
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from pypdf import PdfReader, PdfWriter
+
+          items = [
+              ("A", "Forest Resources - Pacific Northwest and Southeast"),
+              ("B", "Softwood Lumber - Pacific Northwest Region"),
+              ("C", "Softwood Lumber - Southeast Region"),
+              ("D", "Softwood Plywood Manufacturing"),
+              ("E", "Oriented Strandboard"),
+              ("F", "Composite I-Joists - Pacific Northwest and Southeast"),
+              ("G", "Glued Laminated Timbers - Pacific Northwest and Southeast"),
+              ("H", "Laminated Veneer Lumber - Pacific Northwest and Southeast"),
+              ("I", "Design of Residential Building Shells - Minneapolis and Atlanta"),
+              ("J", "Environmental Impacts of a Single Family Building Shell - Harvest to Construction"),
+              ("KLM", "Modules K, L and M - Energy, Use, Maintenance and Disposal"),
+              ("N", "Tracking Carbon from Sequestration in the Forest to Wood Products and Substitution"),
+              ("O", "Environmental Performance Index for the Forest"),
+          ]
+
+          writer = PdfWriter()
+          manifest = []
+          start = 0
+          for code, title in items:
+              p = Path("source") / f"{code}.pdf"
+              reader = PdfReader(str(p), strict=False)
+              count = len(reader.pages)
+              writer.add_outline_item(f"Module {code}: {title}", start)
+              for page in reader.pages:
+                  writer.add_page(page)
+              manifest.append((code, title, count, p.stat().st_size, start + 1, start + count))
+              start += count
+
+          writer.add_metadata({
+              "/Title": "CORRIM Phase I Final Report - Complete Modules A-O",
+              "/Subject": "Life Cycle Environmental Performance of Renewable Building Materials in the Context of Residential Building Construction",
+              "/Author": "Consortium for Research on Renewable Industrial Materials (CORRIM)",
+              "/Keywords": "CORRIM Phase I LCA wood products life cycle assessment"
+          })
+
+          out = Path("out/CORRIM_Phase_I_Final_Report_2004_Complete_Modules_A-O.pdf")
+          with out.open("wb") as f:
+              writer.write(f)
+
+          with open("out/CORRIM_Phase_I_manifest.txt","w",encoding="utf-8") as f:
+              f.write("CORRIM Phase I Final Report - merged module compilation\n")
+              f.write("Original module pages are unmodified; PDF bookmarks were added at module starts.\n\n")
+              for code,title,count,size,p1,p2 in manifest:
+                  f.write(f"Module {code}: {title}\n  pages: {count}; merged pages: {p1}-{p2}; bytes: {size}\n")
+              f.write(f"\nTOTAL PAGES: {start}\n")
+
+          check = PdfReader(str(out), strict=False)
+          assert len(check.pages) == start
+          print(f"MERGED_PAGES={start}")
+          print(f"MERGED_BYTES={out.stat().st_size}")
+          PY
+
+      - name: Upload merged report
+        uses: actions/upload-artifact@v4
+        with:
+          name: CORRIM-Phase-I-Complete
+          path: |
+            out/CORRIM_Phase_I_Final_Report_2004_Complete_Modules_A-O.pdf
+            out/CORRIM_Phase_I_manifest.txt
+          if-no-files-found: error
+          retention-days: 7
