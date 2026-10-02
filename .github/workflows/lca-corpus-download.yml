@@ -1,4 +1,4 @@
-name: Download LCA corpus PDFs
+name: Download LCA corpus PDFs second pass
 
 on:
   push:
@@ -9,298 +9,171 @@ jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: python -m pip install --quiet requests beautifulsoup4 pypdf
+      - name: Install PDF validator
+        run: python -m pip install --quiet requests pypdf
 
-      - name: Resolve and download public PDFs
+      - name: Retrieve targeted public copies
         shell: bash
         run: |
-          cat > /tmp/download_lca.py <<'PY'
-          import csv, json, os, re, time, hashlib
+          cat > /tmp/second_pass.py <<'PY'
+          import csv, hashlib, json, re, time
           from pathlib import Path
-          from urllib.parse import urljoin, quote
           import requests
-          from bs4 import BeautifulSoup
           from pypdf import PdfReader
 
-          ROOT = Path("lca_bundle")
-          PDFDIR = ROOT / "reports"
-          PDFDIR.mkdir(parents=True, exist_ok=True)
-
-          S = requests.Session()
+          OUT=Path("second_pass")
+          PDF=OUT/"reports"
+          PDF.mkdir(parents=True,exist_ok=True)
+          S=requests.Session()
           S.headers.update({
-              "User-Agent": "Mozilla/5.0 (compatible; LCA-research-archiver/1.0; +https://github.com/loggingchance/hello-world)",
-              "Accept": "text/html,application/pdf,application/xhtml+xml,*/*;q=0.8",
+              "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+              "Accept":"application/pdf,text/html,application/xhtml+xml,*/*;q=0.8",
+              "Accept-Language":"en-US,en;q=0.9"
           })
 
-          # Known authoritative/open copies found during corpus verification.
-          HINTS = {
-              "W01": ["https://www.energy.ca.gov/sites/default/files/2021-12/CEC-500-2021-053.pdf"],
-              "W03": ["https://www.frontiersin.org/journals/forests-and-global-change/articles/10.3389/ffgc.2021.642569/pdf"],
-              "W05": ["https://assets.publishing.service.gov.uk/media/5a7da114e5274a676d5332ff/BEAC_Report_290814.pdf"],
-              "W10": ["https://uhra.herts.ac.uk/id/eprint/6092/1/Repo_et_al_2012_GCB_Bioenergy.pdf"],
-              "W12": ["https://iopscience.iop.org/article/10.1088/1748-9326/aaac88/pdf"],
-              "W13": ["https://mn.gov/frc/assets/Buchholz%20et%20al.%20-%202017%20-%20Greenhouse%20gas%20emissions%20of%20local%20wood%20pellet%20heat_tcm1162-532316.pdf"],
-              "W14": ["https://research.fs.usda.gov/download/treesearch/39835.pdf"],
-              "W16": ["https://iopscience.iop.org/article/10.1088/1748-9326/9/2/024007/pdf"],
-              "W20": ["https://pmc.ncbi.nlm.nih.gov/articles/PMC6145497/pdf/nihms982917.pdf"],
-              "W21": ["https://www.nature.com/articles/s43247-023-00698-5.pdf"],
-              "W22": ["https://academic.oup.com/forestscience/article-pdf/56/4/366/64006895/forestscience_56_4_366.pdf"],
-              "W23": ["https://research.fs.usda.gov/download/treesearch/38670.pdf"],
-              "W24": ["https://iopscience.iop.org/article/10.1088/1748-9326/aaa512/pdf"],
-              "W29": ["https://researchportal.bath.ac.uk/files/114850705/Adams_McManus_2014_Small_scale_biomass_gasification_CHP_energy_environmental_evaluation.pdf"],
-              "W36": ["https://www.jstage.jst.go.jp/article/jwrs/57/2/57_2_63/_pdf"],
-              "W39": ["https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.13048"],
-              "W42": ["https://research.fs.usda.gov/download/treesearch/55942.pdf"],
-              "W44": ["https://www.manomet.org/wp-content/uploads/2018/03/Manomet_Biomass_Report_Full_June2010.pdf"],
-              "W46": ["https://repository.usfca.edu/cgi/viewcontent.cgi?article=1014&context=envs"],
-              "W49": ["https://www.epa.gov/sites/default/files/2016-08/documents/framework-for-assessing-biogenic-co2-emissions.pdf"],
-              "W52": ["https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.70045"],
-              "W54": ["https://research.fs.usda.gov/download/treesearch/57031.pdf"],
-              "W55": ["https://www.nature.com/articles/srep15991.pdf"],
-              "W56": ["https://bg.copernicus.org/articles/11/6417/2014/bg-11-6417-2014.pdf"],
-              "W57": ["https://link.springer.com/content/pdf/10.1186/s13705-021-00281-w.pdf"],
-              "W58": ["https://research.fs.usda.gov/download/treesearch/67724.pdf"],
-              "N01": ["https://www.energy.gov/sites/default/files/2025-01/45Y-48E%20Manure%20Counterfactual%20White%20Paper.pdf"],
-              "N02": ["https://nepis.epa.gov/Exe/ZyPDF.cgi?Dockey=P1006DXP.PDF"],
+          targets = {
+            "W07":[
+              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12387",None),
+              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12387",None),
+            ],
+            "W08":[
+              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12198",None),
+              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12198",None),
+            ],
+            "W09":[
+              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12179",None),
+              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12179",None),
+            ],
+            "W19":[
+              ("https://research.fs.usda.gov/download/treesearch/42264.pdf",None),
+            ],
+            "W20":[
+              ("https://europepmc.org/articles/PMC6145497?pdf=render",None),
+              ("https://pmc.ncbi.nlm.nih.gov/articles/PMC6145497/bin/nihms982917.pdf",None),
+              ("https://pmc.ncbi.nlm.nih.gov/articles/PMC6145497/pdf/nihms982917.pdf",None),
+            ],
+            "W22":[
+              ("https://ageconsearch.umn.edu/record/50782/files/WorkingPaper2009-02.pdf",None),
+              ("https://web.uvic.ca/~repa/publications/REPA%20working%20papers/WorkingPaper2009-02.pdf",None),
+            ],
+            "W25":[
+              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12327",None),
+              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12327",None),
+            ],
+            "W29":[
+              ("https://researchportal.bath.ac.uk/files/114850705/Adams_McManus_2014_Small_scale_biomass_gasification_CHP_energy_environmental_evaluation.pdf",
+               "https://researchportal.bath.ac.uk/en/publications/small-scale-biomass-gasification-chp-utilisation-in-industry-ener/"),
+            ],
+            "W37":[
+              ("https://research.fs.usda.gov/download/treesearch/35180.pdf",None),
+            ],
+            "W39":[
+              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.13048",None),
+              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.13048",None),
+            ],
+            "W41":[
+              ("https://www.sciencedirect.com/science/article/pii/S2542435123005378/pdfft?isDTMRedir=true&download=true",
+               "https://www.sciencedirect.com/science/article/pii/S2542435123005378"),
+            ],
+            "W43":[
+              ("https://europepmc.org/articles/PMC7065381?pdf=render",None),
+              ("https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/bin/nihms1561041.pdf",None),
+              ("https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/pdf/nihms1561041.pdf",None),
+            ],
+            "W45":[
+              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12276",None),
+              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12276",None),
+            ],
+            "W46":[
+              ("https://legislature.vermont.gov/Documents/2024/WorkGroups/Senate%20Natural%20Resources/Bills/S.5/Witness%20Documents/S.5~Laura%20Haight~GCB%20Bioenergy%202015~2-8-2023.pdf",None),
+              ("https://repository.usfca.edu/cgi/viewcontent.cgi?article=1014&context=envs",
+               "https://repository.usfca.edu/envs/15/"),
+              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12245",None),
+            ],
+            "W50":[
+              ("https://publications.jrc.ec.europa.eu/repository/bitstream/JRC70663/eur25354en_online.pdf",None),
+              ("https://publications.jrc.ec.europa.eu/repository/bitstream/JRC70663/eur%2025354%20en%20online.pdf",None),
+            ],
+            "W52":[
+              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.70045",None),
+              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.70045",None),
+            ],
+            "W61":[
+              ("https://docs.cpuc.ca.gov/PublishedDocs/Efile/G000/M512/K176/512176981.PDF",None),
+            ],
+            "N01":[
+              ("https://www.energy.gov/sites/default/files/2025-01/generic-counterfactual-greenhouse-gas-emission-factor-for-life-cycle-assessment-of-manure-derived-biogas-and-renewable-natural-gas_010225.pdf",None),
+            ]
           }
 
-          DOI_OVERRIDE = {"W48": "10.1016/j.rser.2019.109514"}
-
-          # These corpus rows identify frameworks/databases rather than one discrete report.
-          NON_SINGLE = {"N03","N04","N05","N06","N07","N08"}
-
-          def doi_from_url(url):
-              if not url: return None
-              m = re.search(r'doi\.org/(10\.\d{4,9}/\S+)', url, flags=re.I)
-              if not m: return None
-              return m.group(1).rstrip(').,;')
-
-          def pdf_ok_bytes(b):
-              return b[:5] == b"%PDF-"
-
-          def save_response(resp, rid, source_url):
-              b = resp.content
-              if not pdf_ok_bytes(b) or len(b) < 4000:
-                  return None
-              path = PDFDIR / f"{rid}.pdf"
-              path.write_bytes(b)
+          def download(rid,url,referer=None):
+              headers={}
+              if referer: headers["Referer"]=referer
               try:
-                  r = PdfReader(str(path), strict=False)
-                  pages = len(r.pages)
-                  if pages < 1:
-                      path.unlink(missing_ok=True)
-                      return None
-              except Exception:
-                  path.unlink(missing_ok=True)
-                  return None
-              return {"file": path.name, "source_url": source_url, "pages": pages, "bytes": len(b),
-                      "sha256": hashlib.sha256(b).hexdigest()}
-
-          def try_url(url, rid, timeout=60):
-              if not url or url == "LOCAL":
-                  return None, None
-              try:
-                  resp = S.get(url, timeout=timeout, allow_redirects=True)
-                  if resp.status_code != 200:
-                      return None, f"HTTP {resp.status_code}: {url}"
-                  ct = (resp.headers.get("content-type") or "").lower()
-                  if "pdf" in ct or pdf_ok_bytes(resp.content):
-                      saved = save_response(resp, rid, resp.url)
-                      if saved: return saved, None
-                  return None, f"not PDF: {resp.url}"
-              except Exception as e:
-                  return None, f"{type(e).__name__}: {url}"
-          
-          def pdf_candidates_from_html(url):
-              out = []
-              try:
-                  r = S.get(url, timeout=45, allow_redirects=True)
-                  if r.status_code != 200 or pdf_ok_bytes(r.content):
-                      return out
-                  soup = BeautifulSoup(r.text, "html.parser")
-                  for key in ["citation_pdf_url","wkhealth_pdf_url","eprints.document_url"]:
-                      for tag in soup.find_all("meta", attrs={"name": re.compile(f"^{re.escape(key)}$", re.I)}):
-                          v=tag.get("content")
-                          if v: out.append(urljoin(r.url, v))
-                  for tag in soup.find_all("meta", attrs={"property": re.compile("pdf", re.I)}):
-                      v=tag.get("content")
-                      if v: out.append(urljoin(r.url, v))
-                  for a in soup.find_all("a", href=True):
-                      href=urljoin(r.url, a["href"])
-                      txt=" ".join(a.stripped_strings).lower()
-                      hlow=href.lower()
-                      if ".pdf" in hlow or ("download" in txt and ("pdf" in txt or "report" in txt)) or "download" in hlow:
-                          out.append(href)
-              except Exception:
-                  pass
-              # preserve order, no duplicates
-              seen=set(); clean=[]
-              for u in out:
-                  if u not in seen:
-                      seen.add(u); clean.append(u)
-              return clean[:30]
-
-          def openalex_candidates(doi):
-              out=[]
-              if not doi: return out
-              urls=[
-                  "https://api.openalex.org/works/https://doi.org/" + doi,
-                  "https://api.openalex.org/works/doi:" + doi,
-              ]
-              data=None
-              for u in urls:
+                  r=S.get(url,headers=headers,timeout=90,allow_redirects=True)
+                  ct=(r.headers.get("content-type") or "").lower()
+                  if r.status_code!=200:
+                      return None,f"HTTP {r.status_code} {r.url}"
+                  b=r.content
+                  if not (b.startswith(b"%PDF-") or "application/pdf" in ct):
+                      return None,f"not-pdf {ct} {r.url}"
+                  if len(b)<5000:
+                      return None,f"too-small {len(b)} {r.url}"
+                  path=PDF/f"{rid}.pdf"
+                  path.write_bytes(b)
                   try:
-                      rr=S.get(u,timeout=30)
-                      if rr.ok:
-                          data=rr.json(); break
-                  except Exception: pass
-              if not data: return out
-              locs=[]
-              if data.get("best_oa_location"): locs.append(data["best_oa_location"])
-              if data.get("primary_location"): locs.append(data["primary_location"])
-              locs += data.get("locations") or []
-              for loc in locs:
-                  if not loc: continue
-                  for k in ("pdf_url","landing_page_url"):
-                      v=loc.get(k)
-                      if v: out.append(v)
-              seen=set(); return [u for u in out if not (u in seen or seen.add(u))]
-
-          def semantic_scholar_candidates(doi):
-              if not doi: return []
-              try:
-                  u="https://api.semanticscholar.org/graph/v1/paper/DOI:"+quote(doi,safe="")+"?fields=openAccessPdf,url"
-                  rr=S.get(u,timeout=30)
-                  if not rr.ok: return []
-                  d=rr.json(); out=[]
-                  oa=d.get("openAccessPdf") or {}
-                  if oa.get("url"): out.append(oa["url"])
-                  if d.get("url"): out.append(d["url"])
-                  return out
-              except Exception:
-                  return []
-
-          def crossref_candidates(doi):
-              if not doi: return []
-              try:
-                  rr=S.get("https://api.crossref.org/works/"+quote(doi,safe=""),timeout=30)
-                  if not rr.ok: return []
-                  msg=rr.json().get("message") or {}
-                  out=[]
-                  for l in msg.get("link") or []:
-                      u=l.get("URL")
-                      if u: out.append(u)
-                  return out
-              except Exception:
-                  return []
-
-          def resolve_item(row):
-              rid=row["id"].strip()
-              direct=(row.get("direct") or "").strip()
-              official=(row.get("official") or "").strip()
-              errors=[]
-
-              if rid == "W60":
-                  return {"id":rid,"status":"LOCAL_COPY_ADDED_LATER","official":official}
-              if rid in NON_SINGLE:
-                  return {"id":rid,"status":"NO_SINGLE_REPORT_FRAMEWORK_OR_DATABASE","official":official}
-
-              # 1: curated known open/authoritative locations + corpus direct link
-              for u in HINTS.get(rid, []) + ([direct] if direct else []):
-                  got,err=try_url(u,rid)
-                  if got:
-                      return {"id":rid,"status":"DOWNLOADED","method":"known/direct",**got,"official":official}
-                  if err: errors.append(err)
-
-              doi=DOI_OVERRIDE.get(rid) or doi_from_url(official)
-
-              # 2: OA scholarly resolvers
-              candidates=[]
-              candidates += openalex_candidates(doi)
-              candidates += semantic_scholar_candidates(doi)
-              candidates += crossref_candidates(doi)
-
-              # 3: DOI publisher page itself (may be PDF or expose citation_pdf_url)
-              if doi:
-                  candidates.append("https://doi.org/"+doi)
-
-              # 4: specific official landing pages
-              if official and not official.startswith("https://doi.org/") and official not in ("LOCAL",):
-                  candidates.append(official)
-
-              seen=set()
-              for u in candidates:
-                  if not u or u in seen: continue
-                  seen.add(u)
-                  got,err=try_url(u,rid)
-                  if got:
-                      return {"id":rid,"status":"DOWNLOADED","method":"resolver/direct",**got,"official":official}
-                  if err: errors.append(err)
-                  # If HTML landing page, inspect it for PDF links
-                  for p in pdf_candidates_from_html(u):
-                      if p in seen: continue
-                      seen.add(p)
-                      got,err=try_url(p,rid)
-                      if got:
-                          return {"id":rid,"status":"DOWNLOADED","method":"landing-page PDF",**got,"official":official}
-                      if err: errors.append(err)
-
-              return {"id":rid,"status":"NOT_PUBLICLY_RETRIEVED","official":official,"doi":doi or "",
-                      "last_errors":" | ".join(errors[-5:])[:2000]}
-
-          with open("tmp/lca-corpus-download.csv", newline="", encoding="utf-8") as f:
-              rows=list(csv.DictReader(f))
+                      pr=PdfReader(str(path),strict=False)
+                      pages=len(pr.pages)
+                      if pages<1: raise ValueError("zero pages")
+                  except Exception as e:
+                      path.unlink(missing_ok=True)
+                      return None,f"invalid-pdf {e}"
+                  return {
+                      "id":rid,"status":"DOWNLOADED","source_url":r.url,
+                      "bytes":len(b),"pages":pages,
+                      "sha256":hashlib.sha256(b).hexdigest()
+                  },None
+              except Exception as e:
+                  return None,f"{type(e).__name__}: {e}"
 
           manifest=[]
-          for i,row in enumerate(rows,1):
-              print(f"[{i}/{len(rows)}] {row['id']}", flush=True)
-              result=resolve_item(row)
-              manifest.append(result)
-              print("  ", result["status"], result.get("source_url",""), flush=True)
-              time.sleep(0.15)
+          for rid,urls in targets.items():
+              errors=[]
+              got=None
+              for url,ref in urls:
+                  print(rid,url,flush=True)
+                  got,err=download(rid,url,ref)
+                  if got: break
+                  errors.append(err)
+                  time.sleep(.2)
+              if got:
+                  manifest.append(got)
+                  print(" SUCCESS",got["pages"],got["source_url"],flush=True)
+              else:
+                  manifest.append({"id":rid,"status":"FAILED","errors":" | ".join(errors)})
+                  print(" FAILED",errors,flush=True)
 
-          # Validate all PDFs once more
-          for p in sorted(PDFDIR.glob("*.pdf")):
-              try:
-                  rr=PdfReader(str(p),strict=False)
-                  assert len(rr.pages)>0
-              except Exception as e:
-                  print("INVALID",p,e)
-                  p.unlink(missing_ok=True)
-                  for m in manifest:
-                      if m.get("file")==p.name:
-                          m["status"]="FAILED_FINAL_PDF_VALIDATION"
-                          m["validation_error"]=str(e)
-
-          fields=["id","status","method","file","pages","bytes","sha256","source_url","official","doi","last_errors"]
-          with open(ROOT/"download_manifest.csv","w",newline="",encoding="utf-8") as f:
+          fields=["id","status","pages","bytes","sha256","source_url","errors"]
+          with open(OUT/"manifest.csv","w",newline="",encoding="utf-8") as f:
               w=csv.DictWriter(f,fieldnames=fields,extrasaction="ignore")
-              w.writeheader()
-              for m in manifest: w.writerow(m)
-          (ROOT/"download_manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
-
-          downloaded=sum(m["status"]=="DOWNLOADED" for m in manifest)
-          unresolved=sum(m["status"]=="NOT_PUBLICLY_RETRIEVED" for m in manifest)
-          nonsingle=sum(m["status"]=="NO_SINGLE_REPORT_FRAMEWORK_OR_DATABASE" for m in manifest)
-          print(f"SUMMARY downloaded={downloaded} unresolved={unresolved} non_single={nonsingle}")
+              w.writeheader(); w.writerows(manifest)
+          (OUT/"manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
+          print("DOWNLOADED",sum(x["status"]=="DOWNLOADED" for x in manifest))
           PY
-          python /tmp/download_lca.py
+          python /tmp/second_pass.py
 
-      - name: Make artifact zip
+      - name: Package second pass
         run: |
-          cd lca_bundle
-          zip -9 -r ../LCA_Corpus_Public_PDFs.zip reports download_manifest.csv download_manifest.json
+          cd second_pass
+          zip -9 -r ../LCA_Corpus_Second_Pass.zip reports manifest.csv manifest.json
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LCA-Corpus-Public-PDFs
-          path: LCA_Corpus_Public_PDFs.zip
-          if-no-files-found: error
+          name: LCA-Corpus-Second-Pass
+          path: LCA_Corpus_Second_Pass.zip
           retention-days: 7
+          if-no-files-found: error
