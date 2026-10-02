@@ -1,4 +1,4 @@
-name: Download LCA corpus PDFs second pass
+name: Download LCA corpus PDFs third pass
 
 on:
   push:
@@ -13,19 +13,21 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install PDF validator
+      - name: Install dependencies
         run: python -m pip install --quiet requests pypdf
 
-      - name: Retrieve targeted public copies
+      - name: Resolve remaining open copies
         shell: bash
         run: |
-          cat > /tmp/second_pass.py <<'PY'
-          import csv, hashlib, json, re, time
+          cat > /tmp/third_pass.py <<'PY'
+          import csv, hashlib, json, re, tarfile, tempfile, time
           from pathlib import Path
+          from urllib.parse import quote
           import requests
           from pypdf import PdfReader
+          import xml.etree.ElementTree as ET
 
-          OUT=Path("second_pass")
+          OUT=Path("third_pass")
           PDF=OUT/"reports"
           PDF.mkdir(parents=True,exist_ok=True)
           S=requests.Session()
@@ -35,145 +37,231 @@ jobs:
               "Accept-Language":"en-US,en;q=0.9"
           })
 
-          targets = {
-            "W07":[
-              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12387",None),
-              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12387",None),
-            ],
-            "W08":[
-              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12198",None),
-              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12198",None),
-            ],
-            "W09":[
-              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12179",None),
-              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12179",None),
-            ],
-            "W19":[
-              ("https://research.fs.usda.gov/download/treesearch/42264.pdf",None),
-            ],
-            "W20":[
-              ("https://europepmc.org/articles/PMC6145497?pdf=render",None),
-              ("https://pmc.ncbi.nlm.nih.gov/articles/PMC6145497/bin/nihms982917.pdf",None),
-              ("https://pmc.ncbi.nlm.nih.gov/articles/PMC6145497/pdf/nihms982917.pdf",None),
-            ],
-            "W22":[
-              ("https://ageconsearch.umn.edu/record/50782/files/WorkingPaper2009-02.pdf",None),
-              ("https://web.uvic.ca/~repa/publications/REPA%20working%20papers/WorkingPaper2009-02.pdf",None),
-            ],
-            "W25":[
-              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12327",None),
-              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12327",None),
-            ],
-            "W29":[
-              ("https://researchportal.bath.ac.uk/files/114850705/Adams_McManus_2014_Small_scale_biomass_gasification_CHP_energy_environmental_evaluation.pdf",
-               "https://researchportal.bath.ac.uk/en/publications/small-scale-biomass-gasification-chp-utilisation-in-industry-ener/"),
-            ],
-            "W37":[
-              ("https://research.fs.usda.gov/download/treesearch/35180.pdf",None),
-            ],
-            "W39":[
-              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.13048",None),
-              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.13048",None),
-            ],
-            "W41":[
-              ("https://www.sciencedirect.com/science/article/pii/S2542435123005378/pdfft?isDTMRedir=true&download=true",
-               "https://www.sciencedirect.com/science/article/pii/S2542435123005378"),
-            ],
-            "W43":[
-              ("https://europepmc.org/articles/PMC7065381?pdf=render",None),
-              ("https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/bin/nihms1561041.pdf",None),
-              ("https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/pdf/nihms1561041.pdf",None),
-            ],
-            "W45":[
-              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12276",None),
-              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.12276",None),
-            ],
-            "W46":[
-              ("https://legislature.vermont.gov/Documents/2024/WorkGroups/Senate%20Natural%20Resources/Bills/S.5/Witness%20Documents/S.5~Laura%20Haight~GCB%20Bioenergy%202015~2-8-2023.pdf",None),
-              ("https://repository.usfca.edu/cgi/viewcontent.cgi?article=1014&context=envs",
-               "https://repository.usfca.edu/envs/15/"),
-              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12245",None),
-            ],
-            "W50":[
-              ("https://publications.jrc.ec.europa.eu/repository/bitstream/JRC70663/eur25354en_online.pdf",None),
-              ("https://publications.jrc.ec.europa.eu/repository/bitstream/JRC70663/eur%2025354%20en%20online.pdf",None),
-            ],
-            "W52":[
-              ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.70045",None),
-              ("https://onlinelibrary.wiley.com/doi/epdf/10.1111/gcbb.70045",None),
-            ],
-            "W61":[
-              ("https://docs.cpuc.ca.gov/PublishedDocs/Efile/G000/M512/K176/512176981.PDF",None),
-            ],
-            "N01":[
-              ("https://www.energy.gov/sites/default/files/2025-01/generic-counterfactual-greenhouse-gas-emission-factor-for-life-cycle-assessment-of-manure-derived-biogas-and-renewable-natural-gas_010225.pdf",None),
-            ]
+          # Corpus items still missing after direct/repository passes.
+          dois = {
+            "W06":"10.1021/es1024004",
+            "W07":"10.1111/gcbb.12387",
+            "W08":"10.1111/gcbb.12198",
+            "W09":"10.1111/gcbb.12179",
+            "W15":"10.1139/cjfr-2014-0210",
+            "W18":"10.1016/j.jfe.2013.05.003",
+            "W25":"10.1111/gcbb.12327",
+            "W26":"10.1016/0961-9534(95)00020-8",
+            "W27":"10.1016/j.biombioe.2012.06.027",
+            "W28":"10.1016/j.biombioe.2010.04.009",
+            "W29":"10.1016/j.seta.2014.02.002",
+            "W30":"10.1016/j.biombioe.2025.108260",
+            "W31":"10.1016/j.jclepro.2017.03.026",
+            "W32":"10.1016/j.scitotenv.2021.149716",
+            "W33":"10.1016/j.enpol.2019.01.006",
+            "W34":"10.1016/j.apenergy.2016.02.018",
+            "W35":"10.1016/j.renene.2019.12.013",
+            "W38":"10.1016/j.rser.2013.08.101",
+            "W39":"10.1111/gcbb.13048",
+            "W40":"10.1016/j.biombioe.2012.09.037",
+            "W41":"10.1016/j.joule.2023.12.018",
+            "W43":"10.1016/j.enpol.2018.10.009",
+            "W45":"10.1111/gcbb.12276",
+            "W48":"10.1016/j.rser.2019.109514",
+            "W52":"10.1111/gcbb.70045",
           }
 
-          def download(rid,url,referer=None):
-              headers={}
-              if referer: headers["Referer"]=referer
+          pii = {
+            "W18":"S1104689913000226",
+            "W27":"S0961953412002693",
+            "W28":"S0961953410001364",
+            "W29":"S2213138814000198",
+            "W30":"S0961953425006713",
+            "W31":"S0959652617304614",
+            "W32":"S0048969721047914",
+            "W33":"S0301421519300060",
+            "W34":"S0306261916301416",
+            "W35":"S096014811931883X",
+            "W38":"S1364032113006503",
+            "W40":"S0961953412003777",
+            "W41":"S2542435123005378",
+            "W43":"S030142151830661X",
+            "W48":"S1364032119307221",
+          }
+
+          pmc = {"W20":"PMC6145497","W43":"PMC7065381"}
+
+          manual = {
+            "W29":[
+              "https://researchportal.bath.ac.uk/files/114850705/Adams_McManus_2014_Small_scale_biomass_gasification_CHP_energy_environmental_evaluation.pdf?download=1",
+              "https://researchportal.bath.ac.uk/files/114850705/Adams_McManus_2014_Small_scale_biomass_gasification_CHP_energy_environmental_evaluation.pdf",
+            ],
+            "W31":[
+              "https://digitalcommons.mtu.edu/cgi/viewcontent.cgi?article=1046&context=materials_fp",
+            ],
+          }
+
+          def validate_save(rid,b,url,method):
+              if not b.startswith(b"%PDF-") or len(b)<5000:
+                  return None
+              p=PDF/f"{rid}.pdf"
+              p.write_bytes(b)
               try:
-                  r=S.get(url,headers=headers,timeout=90,allow_redirects=True)
-                  ct=(r.headers.get("content-type") or "").lower()
+                  pr=PdfReader(str(p),strict=False)
+                  pages=len(pr.pages)
+                  if pages<1: raise ValueError("zero pages")
+              except Exception:
+                  p.unlink(missing_ok=True); return None
+              return {"id":rid,"status":"DOWNLOADED","method":method,"source_url":url,
+                      "pages":pages,"bytes":len(b),"sha256":hashlib.sha256(b).hexdigest()}
+
+          def try_url(rid,url,method,headers=None):
+              try:
+                  r=S.get(url,headers=headers or {},timeout=90,allow_redirects=True)
                   if r.status_code!=200:
-                      return None,f"HTTP {r.status_code} {r.url}"
-                  b=r.content
-                  if not (b.startswith(b"%PDF-") or "application/pdf" in ct):
-                      return None,f"not-pdf {ct} {r.url}"
-                  if len(b)<5000:
-                      return None,f"too-small {len(b)} {r.url}"
-                  path=PDF/f"{rid}.pdf"
-                  path.write_bytes(b)
-                  try:
-                      pr=PdfReader(str(path),strict=False)
-                      pages=len(pr.pages)
-                      if pages<1: raise ValueError("zero pages")
-                  except Exception as e:
-                      path.unlink(missing_ok=True)
-                      return None,f"invalid-pdf {e}"
-                  return {
-                      "id":rid,"status":"DOWNLOADED","source_url":r.url,
-                      "bytes":len(b),"pages":pages,
-                      "sha256":hashlib.sha256(b).hexdigest()
-                  },None
+                      return None,f"HTTP {r.status_code}: {r.url}"
+                  got=validate_save(rid,r.content,r.url,method)
+                  if got: return got,None
+                  return None,f"not PDF: {r.url} ({r.headers.get('content-type','')})"
               except Exception as e:
-                  return None,f"{type(e).__name__}: {e}"
+                  return None,f"{type(e).__name__}: {url}: {e}"
 
+          def unpaywall_urls(doi):
+              out=[]
+              try:
+                  u="https://api.unpaywall.org/v2/"+quote(doi,safe="")+"?email=research@example.com"
+                  r=S.get(u,timeout=45)
+                  if not r.ok: return out
+                  d=r.json()
+                  locs=[]
+                  if d.get("best_oa_location"): locs.append(d["best_oa_location"])
+                  locs += d.get("oa_locations") or []
+                  for loc in locs:
+                      if not loc: continue
+                      for k in ("url_for_pdf","url"):
+                          v=loc.get(k)
+                          if v: out.append(v)
+              except Exception:
+                  pass
+              seen=set(); return [x for x in out if not (x in seen or seen.add(x))]
+
+          def openalex_urls(doi):
+              out=[]
+              try:
+                  r=S.get("https://api.openalex.org/works/https://doi.org/"+doi,timeout=45)
+                  if not r.ok: return out
+                  d=r.json()
+                  locs=[]
+                  for k in ("best_oa_location","primary_location"):
+                      if d.get(k): locs.append(d[k])
+                  locs += d.get("locations") or []
+                  for loc in locs:
+                      if not loc: continue
+                      for k in ("pdf_url","landing_page_url"):
+                          if loc.get(k): out.append(loc[k])
+              except Exception:
+                  pass
+              seen=set(); return [x for x in out if not (x in seen or seen.add(x))]
+
+          def pmc_oa_pdf(rid,pmcid):
+              errs=[]
+              try:
+                  api="https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id="+pmcid
+                  r=S.get(api,timeout=45)
+                  if not r.ok: return None,[f"OA API HTTP {r.status_code}"]
+                  root=ET.fromstring(r.text)
+                  hrefs=[]
+                  for link in root.findall(".//link"):
+                      href=link.attrib.get("href","")
+                      fmt=link.attrib.get("format","")
+                      if href and fmt in ("pdf","tgz"): hrefs.append((fmt,href))
+                  for fmt,href in hrefs:
+                      if href.startswith("ftp://"):
+                          href="https://ftp.ncbi.nlm.nih.gov"+href.split("ftp.ncbi.nlm.nih.gov",1)[-1]
+                      if fmt=="pdf":
+                          got,err=try_url(rid,href,"PMC OA API")
+                          if got: return got,errs
+                          errs.append(err)
+                      elif fmt=="tgz":
+                          rr=S.get(href,timeout=120)
+                          if rr.ok:
+                              with tempfile.TemporaryDirectory() as td:
+                                  tgz=Path(td)/"x.tgz"; tgz.write_bytes(rr.content)
+                                  try:
+                                      with tarfile.open(tgz,"r:gz") as tf: tf.extractall(td)
+                                      for p in Path(td).rglob("*.pdf"):
+                                          got=validate_save(rid,p.read_bytes(),href,"PMC OA package")
+                                          if got: return got,errs
+                                  except Exception as e: errs.append("tgz:"+str(e))
+                          else: errs.append(f"tgz HTTP {rr.status_code}")
+              except Exception as e: errs.append(str(e))
+              return None,errs
+
+          all_ids=sorted(set(dois)|set(pmc)|set(manual))
           manifest=[]
-          for rid,urls in targets.items():
-              errors=[]
-              got=None
-              for url,ref in urls:
-                  print(rid,url,flush=True)
-                  got,err=download(rid,url,ref)
+          for i,rid in enumerate(all_ids,1):
+              print(f"[{i}/{len(all_ids)}] {rid}",flush=True)
+              errs=[]; got=None
+
+              # PMC package first for NIH manuscripts.
+              if rid in pmc:
+                  got,ee=pmc_oa_pdf(rid,pmc[rid]); errs += ee
+                  if got:
+                      manifest.append(got); print("  SUCCESS PMC",got["pages"],flush=True); continue
+
+              # Explicit repositories.
+              for u in manual.get(rid,[]):
+                  got,err=try_url(rid,u,"manual repository")
                   if got: break
-                  errors.append(err)
-                  time.sleep(.2)
+                  errs.append(err)
               if got:
-                  manifest.append(got)
-                  print(" SUCCESS",got["pages"],got["source_url"],flush=True)
-              else:
-                  manifest.append({"id":rid,"status":"FAILED","errors":" | ".join(errors)})
-                  print(" FAILED",errors,flush=True)
+                  manifest.append(got); print("  SUCCESS manual",got["pages"],flush=True); continue
 
-          fields=["id","status","pages","bytes","sha256","source_url","errors"]
+              # Open-access aggregators.
+              doi=dois.get(rid)
+              candidates=[]
+              if doi:
+                  candidates += unpaywall_urls(doi)
+                  candidates += openalex_urls(doi)
+              seen=set()
+              for u in candidates:
+                  if not u or u in seen: continue
+                  seen.add(u)
+                  got,err=try_url(rid,u,"OA resolver")
+                  if got: break
+                  errs.append(err)
+              if got:
+                  manifest.append(got); print("  SUCCESS OA",got["pages"],flush=True); continue
+
+              # Elsevier accepted-manuscript endpoint.
+              if rid in pii:
+                  u=f"https://www.sciencedirect.com/science/article/am/pii/{pii[rid]}"
+                  got,err=try_url(rid,u,"ScienceDirect accepted manuscript")
+                  if not got:
+                      errs.append(err)
+                      # Some Elsevier pages expose a downloadable PDF via this path.
+                      u2=f"https://www.sciencedirect.com/science/article/pii/{pii[rid]}/pdfft?isDTMRedir=true&download=true"
+                      got,err=try_url(rid,u2,"ScienceDirect PDF")
+                      if not got: errs.append(err)
+                  if got:
+                      manifest.append(got); print("  SUCCESS Elsevier",got["pages"],flush=True); continue
+
+              manifest.append({"id":rid,"status":"FAILED","doi":doi or "",
+                               "errors":" | ".join(x for x in errs if x)[-6000:]})
+              print("  FAILED",flush=True)
+              time.sleep(.1)
+
+          fields=["id","status","method","pages","bytes","sha256","source_url","doi","errors"]
           with open(OUT/"manifest.csv","w",newline="",encoding="utf-8") as f:
-              w=csv.DictWriter(f,fieldnames=fields,extrasaction="ignore")
-              w.writeheader(); w.writerows(manifest)
+              w=csv.DictWriter(f,fieldnames=fields,extrasaction="ignore"); w.writeheader(); w.writerows(manifest)
           (OUT/"manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
-          print("DOWNLOADED",sum(x["status"]=="DOWNLOADED" for x in manifest))
+          print("DOWNLOADED",sum(x["status"]=="DOWNLOADED" for x in manifest),flush=True)
           PY
-          python /tmp/second_pass.py
+          python /tmp/third_pass.py
 
-      - name: Package second pass
+      - name: Package third pass
         run: |
-          cd second_pass
-          zip -9 -r ../LCA_Corpus_Second_Pass.zip reports manifest.csv manifest.json
+          cd third_pass
+          zip -9 -r ../LCA_Corpus_Third_Pass.zip reports manifest.csv manifest.json
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LCA-Corpus-Second-Pass
-          path: LCA_Corpus_Second_Pass.zip
+          name: LCA-Corpus-Third-Pass
+          path: LCA_Corpus_Third_Pass.zip
           retention-days: 7
           if-no-files-found: error
