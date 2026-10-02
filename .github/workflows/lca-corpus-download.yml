@@ -1,4 +1,4 @@
-name: Download LCA corpus PDFs third pass
+name: Recover embedded and repository LCA PDFs
 
 on:
   push:
@@ -6,262 +6,94 @@ on:
       - '.github/workflows/lca-corpus-download.yml'
 
 jobs:
-  download:
+  recover:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: python -m pip install --quiet requests pypdf
+      - name: Install PDF tools
+        run: python -m pip install --quiet pypdf requests
 
-      - name: Resolve remaining open copies
+      - name: Recover articles
         shell: bash
         run: |
-          cat > /tmp/third_pass.py <<'PY'
-          import csv, hashlib, json, re, tarfile, tempfile, time
+          set -euo pipefail
+          mkdir -p recovered/reports
+          python - <<'PY'
+          import hashlib, json, requests
           from pathlib import Path
-          from urllib.parse import quote
-          import requests
-          from pypdf import PdfReader
-          import xml.etree.ElementTree as ET
+          from pypdf import PdfReader, PdfWriter
 
-          OUT=Path("third_pass")
-          PDF=OUT/"reports"
-          PDF.mkdir(parents=True,exist_ok=True)
-          S=requests.Session()
-          S.headers.update({
-              "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
-              "Accept":"application/pdf,text/html,application/xhtml+xml,*/*;q=0.8",
-              "Accept-Language":"en-US,en;q=0.9"
-          })
-
-          # Corpus items still missing after direct/repository passes.
-          dois = {
-            "W06":"10.1021/es1024004",
-            "W07":"10.1111/gcbb.12387",
-            "W08":"10.1111/gcbb.12198",
-            "W09":"10.1111/gcbb.12179",
-            "W15":"10.1139/cjfr-2014-0210",
-            "W18":"10.1016/j.jfe.2013.05.003",
-            "W25":"10.1111/gcbb.12327",
-            "W26":"10.1016/0961-9534(95)00020-8",
-            "W27":"10.1016/j.biombioe.2012.06.027",
-            "W28":"10.1016/j.biombioe.2010.04.009",
-            "W29":"10.1016/j.seta.2014.02.002",
-            "W30":"10.1016/j.biombioe.2025.108260",
-            "W31":"10.1016/j.jclepro.2017.03.026",
-            "W32":"10.1016/j.scitotenv.2021.149716",
-            "W33":"10.1016/j.enpol.2019.01.006",
-            "W34":"10.1016/j.apenergy.2016.02.018",
-            "W35":"10.1016/j.renene.2019.12.013",
-            "W38":"10.1016/j.rser.2013.08.101",
-            "W39":"10.1111/gcbb.13048",
-            "W40":"10.1016/j.biombioe.2012.09.037",
-            "W41":"10.1016/j.joule.2023.12.018",
-            "W43":"10.1016/j.enpol.2018.10.009",
-            "W45":"10.1111/gcbb.12276",
-            "W48":"10.1016/j.rser.2019.109514",
-            "W52":"10.1111/gcbb.70045",
-          }
-
-          pii = {
-            "W18":"S1104689913000226",
-            "W27":"S0961953412002693",
-            "W28":"S0961953410001364",
-            "W29":"S2213138814000198",
-            "W30":"S0961953425006713",
-            "W31":"S0959652617304614",
-            "W32":"S0048969721047914",
-            "W33":"S0301421519300060",
-            "W34":"S0306261916301416",
-            "W35":"S096014811931883X",
-            "W38":"S1364032113006503",
-            "W40":"S0961953412003777",
-            "W41":"S2542435123005378",
-            "W43":"S030142151830661X",
-            "W48":"S1364032119307221",
-          }
-
-          pmc = {"W20":"PMC6145497","W43":"PMC7065381"}
-
-          manual = {
-            "W29":[
-              "https://researchportal.bath.ac.uk/files/114850705/Adams_McManus_2014_Small_scale_biomass_gasification_CHP_energy_environmental_evaluation.pdf?download=1",
-              "https://researchportal.bath.ac.uk/files/114850705/Adams_McManus_2014_Small_scale_biomass_gasification_CHP_energy_environmental_evaluation.pdf",
-            ],
-            "W31":[
-              "https://digitalcommons.mtu.edu/cgi/viewcontent.cgi?article=1046&context=materials_fp",
-            ],
-          }
-
-          def validate_save(rid,b,url,method):
-              if not b.startswith(b"%PDF-") or len(b)<5000:
-                  return None
-              p=PDF/f"{rid}.pdf"
-              p.write_bytes(b)
-              try:
-                  pr=PdfReader(str(p),strict=False)
-                  pages=len(pr.pages)
-                  if pages<1: raise ValueError("zero pages")
-              except Exception:
-                  p.unlink(missing_ok=True); return None
-              return {"id":rid,"status":"DOWNLOADED","method":method,"source_url":url,
-                      "pages":pages,"bytes":len(b),"sha256":hashlib.sha256(b).hexdigest()}
-
-          def try_url(rid,url,method,headers=None):
-              try:
-                  r=S.get(url,headers=headers or {},timeout=90,allow_redirects=True)
-                  if r.status_code!=200:
-                      return None,f"HTTP {r.status_code}: {r.url}"
-                  got=validate_save(rid,r.content,r.url,method)
-                  if got: return got,None
-                  return None,f"not PDF: {r.url} ({r.headers.get('content-type','')})"
-              except Exception as e:
-                  return None,f"{type(e).__name__}: {url}: {e}"
-
-          def unpaywall_urls(doi):
-              out=[]
-              try:
-                  u="https://api.unpaywall.org/v2/"+quote(doi,safe="")+"?email=research@example.com"
-                  r=S.get(u,timeout=45)
-                  if not r.ok: return out
-                  d=r.json()
-                  locs=[]
-                  if d.get("best_oa_location"): locs.append(d["best_oa_location"])
-                  locs += d.get("oa_locations") or []
-                  for loc in locs:
-                      if not loc: continue
-                      for k in ("url_for_pdf","url"):
-                          v=loc.get(k)
-                          if v: out.append(v)
-              except Exception:
-                  pass
-              seen=set(); return [x for x in out if not (x in seen or seen.add(x))]
-
-          def openalex_urls(doi):
-              out=[]
-              try:
-                  r=S.get("https://api.openalex.org/works/https://doi.org/"+doi,timeout=45)
-                  if not r.ok: return out
-                  d=r.json()
-                  locs=[]
-                  for k in ("best_oa_location","primary_location"):
-                      if d.get(k): locs.append(d[k])
-                  locs += d.get("locations") or []
-                  for loc in locs:
-                      if not loc: continue
-                      for k in ("pdf_url","landing_page_url"):
-                          if loc.get(k): out.append(loc[k])
-              except Exception:
-                  pass
-              seen=set(); return [x for x in out if not (x in seen or seen.add(x))]
-
-          def pmc_oa_pdf(rid,pmcid):
-              errs=[]
-              try:
-                  api="https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id="+pmcid
-                  r=S.get(api,timeout=45)
-                  if not r.ok: return None,[f"OA API HTTP {r.status_code}"]
-                  root=ET.fromstring(r.text)
-                  hrefs=[]
-                  for link in root.findall(".//link"):
-                      href=link.attrib.get("href","")
-                      fmt=link.attrib.get("format","")
-                      if href and fmt in ("pdf","tgz"): hrefs.append((fmt,href))
-                  for fmt,href in hrefs:
-                      if href.startswith("ftp://"):
-                          href="https://ftp.ncbi.nlm.nih.gov"+href.split("ftp.ncbi.nlm.nih.gov",1)[-1]
-                      if fmt=="pdf":
-                          got,err=try_url(rid,href,"PMC OA API")
-                          if got: return got,errs
-                          errs.append(err)
-                      elif fmt=="tgz":
-                          rr=S.get(href,timeout=120)
-                          if rr.ok:
-                              with tempfile.TemporaryDirectory() as td:
-                                  tgz=Path(td)/"x.tgz"; tgz.write_bytes(rr.content)
-                                  try:
-                                      with tarfile.open(tgz,"r:gz") as tf: tf.extractall(td)
-                                      for p in Path(td).rglob("*.pdf"):
-                                          got=validate_save(rid,p.read_bytes(),href,"PMC OA package")
-                                          if got: return got,errs
-                                  except Exception as e: errs.append("tgz:"+str(e))
-                          else: errs.append(f"tgz HTTP {rr.status_code}")
-              except Exception as e: errs.append(str(e))
-              return None,errs
-
-          all_ids=sorted(set(dois)|set(pmc)|set(manual))
+          out=Path("recovered/reports")
+          s=requests.Session()
+          s.headers.update({"User-Agent":"Mozilla/5.0","Accept":"application/pdf,*/*;q=0.8"})
           manifest=[]
-          for i,rid in enumerate(all_ids,1):
-              print(f"[{i}/{len(all_ids)}] {rid}",flush=True)
-              errs=[]; got=None
 
-              # PMC package first for NIH manuscripts.
-              if rid in pmc:
-                  got,ee=pmc_oa_pdf(rid,pmc[rid]); errs += ee
-                  if got:
-                      manifest.append(got); print("  SUCCESS PMC",got["pages"],flush=True); continue
+          def save_direct(rid,url):
+              try:
+                  r=s.get(url,timeout=120,allow_redirects=True)
+                  b=r.content
+                  if r.status_code==200 and b.startswith(b"%PDF-") and len(b)>5000:
+                      p=out/f"{rid}.pdf"; p.write_bytes(b)
+                      pages=len(PdfReader(str(p),strict=False).pages)
+                      manifest.append({"id":rid,"status":"DOWNLOADED","source_url":r.url,"pages":pages,
+                                       "sha256":hashlib.sha256(b).hexdigest(),"method":"institutional repository"})
+                      print("DIRECT",rid,pages,r.url)
+                      return True
+                  print("DIRECT FAIL",rid,r.status_code,r.url,r.headers.get("content-type"))
+              except Exception as e:
+                  print("DIRECT ERR",rid,e)
+              return False
 
-              # Explicit repositories.
-              for u in manual.get(rid,[]):
-                  got,err=try_url(rid,u,"manual repository")
-                  if got: break
-                  errs.append(err)
-              if got:
-                  manifest.append(got); print("  SUCCESS manual",got["pages"],flush=True); continue
+          # Cleaner institutional repository endpoint for Adams & McManus.
+          save_direct("W29","https://purehost.bath.ac.uk/ws/files/114850705/Adams_McManus_2014_Small_scale_biomass_gasification_CHP_energy_environmental_evaluation.pdf")
 
-              # Open-access aggregators.
-              doi=dois.get(rid)
-              candidates=[]
-              if doi:
-                  candidates += unpaywall_urls(doi)
-                  candidates += openalex_urls(doi)
-              seen=set()
-              for u in candidates:
-                  if not u or u in seen: continue
-                  seen.add(u)
-                  got,err=try_url(rid,u,"OA resolver")
-                  if got: break
-                  errs.append(err)
-              if got:
-                  manifest.append(got); print("  SUCCESS OA",got["pages"],flush=True); continue
+          # Public rulemaking/comment attachment containing complete copies of cited studies.
+          nrdc_url="https://www.nrdc.org/sites/default/files/joint-engo-ace-biomass-comments-20181031.pdf"
+          r=s.get(nrdc_url,timeout=180,allow_redirects=True)
+          if not (r.status_code==200 and r.content.startswith(b"%PDF-")):
+              raise RuntimeError(f"NRDC source failed: {r.status_code} {r.url} {r.headers.get('content-type')}")
+          src=Path("recovered/nrdc_comments.pdf"); src.write_bytes(r.content)
+          reader=PdfReader(str(src),strict=False)
+          print("NRDC pages",len(reader.pages))
 
-              # Elsevier accepted-manuscript endpoint.
-              if rid in pii:
-                  u=f"https://www.sciencedirect.com/science/article/am/pii/{pii[rid]}"
-                  got,err=try_url(rid,u,"ScienceDirect accepted manuscript")
-                  if not got:
-                      errs.append(err)
-                      # Some Elsevier pages expose a downloadable PDF via this path.
-                      u2=f"https://www.sciencedirect.com/science/article/pii/{pii[rid]}/pdfft?isDTMRedir=true&download=true"
-                      got,err=try_url(rid,u2,"ScienceDirect PDF")
-                      if not got: errs.append(err)
-                  if got:
-                      manifest.append(got); print("  SUCCESS Elsevier",got["pages"],flush=True); continue
+          # 1-based page ranges in the public attachment. Each range is the complete article.
+          ranges={
+              "W25":(83,94),   # Laganière et al., GCB Bioenergy 9:358-369
+              "W06":(96,102),  # McKechnie et al., ES&T 45:789-795
+              "W09":(115,125), # Repo et al., GCB Bioenergy 7:877-887
+              "W08":(134,146), # Ter-Mikaelian et al., GCB Bioenergy 7:704-716
+          }
+          for rid,(p1,p2) in ranges.items():
+              w=PdfWriter()
+              for n in range(p1-1,p2):
+                  w.add_page(reader.pages[n])
+              path=out/f"{rid}.pdf"
+              with path.open("wb") as fh: w.write(fh)
+              check=PdfReader(str(path),strict=False)
+              b=path.read_bytes()
+              manifest.append({"id":rid,"status":"DOWNLOADED","source_url":nrdc_url,
+                               "pages":len(check.pages),"sha256":hashlib.sha256(b).hexdigest(),
+                               "method":f"extracted complete article from public regulatory-comment attachment, source pages {p1}-{p2}"})
+              print("EXTRACT",rid,len(check.pages))
 
-              manifest.append({"id":rid,"status":"FAILED","doi":doi or "",
-                               "errors":" | ".join(x for x in errs if x)[-6000:]})
-              print("  FAILED",flush=True)
-              time.sleep(.1)
-
-          fields=["id","status","method","pages","bytes","sha256","source_url","doi","errors"]
-          with open(OUT/"manifest.csv","w",newline="",encoding="utf-8") as f:
-              w=csv.DictWriter(f,fieldnames=fields,extrasaction="ignore"); w.writeheader(); w.writerows(manifest)
-          (OUT/"manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
-          print("DOWNLOADED",sum(x["status"]=="DOWNLOADED" for x in manifest),flush=True)
+          Path("recovered/manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
+          import csv
+          with open("recovered/manifest.csv","w",newline="",encoding="utf-8") as fh:
+              w=csv.DictWriter(fh,fieldnames=["id","status","method","source_url","pages","sha256"])
+              w.writeheader(); w.writerows(manifest)
           PY
-          python /tmp/third_pass.py
 
-      - name: Package third pass
+      - name: Package
         run: |
-          cd third_pass
-          zip -9 -r ../LCA_Corpus_Third_Pass.zip reports manifest.csv manifest.json
+          cd recovered
+          zip -9 -r ../LCA_Corpus_Recovered.zip reports manifest.csv manifest.json
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LCA-Corpus-Third-Pass
-          path: LCA_Corpus_Third_Pass.zip
+          name: LCA-Corpus-Recovered
+          path: LCA_Corpus_Recovered.zip
           retention-days: 7
           if-no-files-found: error
