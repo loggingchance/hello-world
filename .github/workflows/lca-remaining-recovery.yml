@@ -1,0 +1,123 @@
+name: Recover remaining open LCA studies
+
+on:
+  push:
+    paths:
+      - '.github/workflows/lca-remaining-recovery.yml'
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install validator
+        run: python -m pip install --quiet pypdf
+      - name: Recover PDFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36'
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)"
+
+          fetch_pdf () {
+            id="$1"; url="$2"; ref="${3:-}"
+            echo "FETCH $id $url"
+            args=(-L --retry 3 --retry-delay 1 --connect-timeout 20 --max-time 180 --http1.1 -A "$UA" -H 'Accept: application/pdf,*/*;q=0.8')
+            if [ -n "$ref" ]; then args+=(-e "$ref"); fi
+            if curl "${args[@]}" -o "out/$id.tmp" "$url"; then
+              if head -c 5 "out/$id.tmp" | grep -q '%PDF-'; then
+                mv "out/$id.tmp" "out/$id.pdf"
+                echo "SUCCESS PDF $id"
+                return 0
+              fi
+            fi
+            rm -f "out/$id.tmp"
+            return 1
+          }
+
+          render_page () {
+            id="$1"; url="$2"
+            echo "RENDER $id $url"
+            timeout 180 "$CHROME" --headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu               --run-all-compositor-stages-before-draw --virtual-time-budget=25000               --print-to-pdf="out/$id.pdf" "$url" || true
+          }
+
+          # W18: public 31-page AAEA/AgEcon working paper corresponding to the journal study.
+          fetch_pdf W18 'https://ageconsearch.umn.edu/record/150293/files/Baker%20et%20al_AAEA%202013_A%20multi-sector%20intertemporal%20optimization%20approach%20to%20assess%20the%20GHG%20implications%20of%20U.S.%20forest%20and%20agricultural%20biomass%20electricity%20expansion.pdf' ||           fetch_pdf W18 'https://purl.umn.edu/150293' || true
+
+          # W27: underlying NCASI technical report for the journal article.
+          fetch_pdf W27 'https://ncasi.org/wp-content/uploads/2015/08/tb984.pdf' || true
+
+          # Exact/open article copies via ProQuest openview.
+          fetch_pdf W39 'https://search.proquest.com/openview/80efeb38f24ba466f657180f580b32eb/1.pdf?cbl=866396&pq-origsite=gscholar' || true
+          fetch_pdf W52 'https://search.proquest.com/openview/a6b1af387a8924865cc40f65dceb07f2/1.pdf?cbl=866396&pq-origsite=gscholar' || true
+
+          # Exact open-access publisher PDF (also cited directly in a public Treasury rulemaking comment).
+          fetch_pdf W41 'https://www.cell.com/action/showPdf?pii=S2542-4351%2823%2900537-8' 'https://www.cell.com/joule/fulltext/S2542-4351(23)00537-8' || true
+
+          # ResearchGate open/full-text pages for CC-BY papers. Use page rendering only if a raw PDF was unavailable.
+          render_page W07 'https://www.researchgate.net/publication/305801682_Climate_change_mitigation_potential_of_local_use_of_harvest_residues_for_bioenergy_in_Canada'
+          render_page W45 'https://www.researchgate.net/publication/276074355_Forest_Biomass_Energy_Assessing_Atmospheric_Carbon_Impacts_by_Discounting_Future_Carbon_Flows'
+          [ -f out/W39.pdf ] || render_page W39 'https://www.researchgate.net/publication/369244123_Diverting_residual_biomass_to_energy_use_Quantifying_the_global_warming_potential_of_biogenic_CO_2_GWP_bCO2'
+          [ -f out/W41.pdf ] || render_page W41 'https://www.researchgate.net/publication/377530614_Soil_organic_carbon_change_can_reduce_the_climate_benefits_of_biofuel_produced_from_forest_residues'
+          [ -f out/W52.pdf ] || render_page W52 'https://www.researchgate.net/publication/391804775_Assessing_GHG_Emissions_Implications_of_Forest_Residue_Use_for_Energy_Production'
+
+          python - <<'PY'
+          import csv,json,re
+          from pathlib import Path
+          from pypdf import PdfReader
+
+          expected={
+            "W07":["climate change mitigation potential","harvest residues"],
+            "W18":["multi-sector intertemporal optimization","biomass electricity"],
+            "W27":["black liquor recovery"],
+            "W39":["diverting residual biomass","biogenic"],
+            "W41":["soil organic carbon change","forest residues"],
+            "W45":["forest biomass energy","discounting future carbon flows"],
+            "W52":["assessing ghg emissions implications","forest residue"],
+          }
+          version={
+            "W18":"public working-paper version of the same study",
+            "W27":"underlying NCASI Technical Bulletin 984; more complete technical report supporting the later journal article",
+            "W07":"exact article or browser-rendered open full text",
+            "W39":"exact article or browser-rendered open full text",
+            "W41":"exact article or browser-rendered open full text",
+            "W45":"exact article or browser-rendered open full text",
+            "W52":"exact article or browser-rendered open full text",
+          }
+          rows=[]
+          for id,terms in expected.items():
+            p=Path("out")/(id+".pdf")
+            if not p.exists() or p.stat().st_size<5000:
+                rows.append({"id":id,"status":"FAILED","version":version[id],"reason":"missing or too small"})
+                p.unlink(missing_ok=True); continue
+            try:
+                r=PdfReader(str(p),strict=False)
+                pages=len(r.pages)
+                text="\n".join((pg.extract_text() or "") for pg in r.pages[:min(pages,12)]).lower()
+                good=all(t in text for t in terms)
+                if not good:
+                    rows.append({"id":id,"status":"FAILED_VALIDATION","version":version[id],"pages":pages,
+                                 "reason":"expected title/content terms not found",
+                                 "sample":re.sub(r'\s+',' ',text[:500])})
+                    p.unlink(missing_ok=True)
+                else:
+                    rows.append({"id":id,"status":"RECOVERED","version":version[id],"pages":pages,"bytes":p.stat().st_size})
+            except Exception as e:
+                rows.append({"id":id,"status":"FAILED_VALIDATION","version":version[id],"reason":str(e)})
+                p.unlink(missing_ok=True)
+          with open("out/manifest.csv","w",newline="",encoding="utf-8") as f:
+              w=csv.DictWriter(f,fieldnames=["id","status","version","pages","bytes","reason","sample"],extrasaction="ignore")
+              w.writeheader(); w.writerows(rows)
+          Path("out/manifest.json").write_text(json.dumps(rows,indent=2),encoding="utf-8")
+          print(json.dumps(rows,indent=2))
+          PY
+      - name: Package
+        run: zip -9 -r remaining_recovery.zip out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LCA-Remaining-Recovery
+          path: remaining_recovery.zip
+          retention-days: 7
