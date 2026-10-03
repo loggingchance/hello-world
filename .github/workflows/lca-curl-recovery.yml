@@ -1,0 +1,93 @@
+name: Curl recover open corpus PDFs
+
+on:
+  push:
+    paths:
+      - '.github/workflows/lca-curl-recovery.yml'
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recover
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36'
+          fetch () {
+            id="$1"; url="$2"; ref="${3:-}"
+            echo "TRY $id $url"
+            args=(-L --fail --retry 3 --retry-delay 1 --connect-timeout 20 --max-time 180 --http1.1 -A "$UA" -H 'Accept: application/pdf,text/html,*/*;q=0.8')
+            if [ -n "$ref" ]; then args+=(-e "$ref"); fi
+            if curl "${args[@]}" -o "out/$id.tmp" "$url"; then
+              if head -c 5 "out/$id.tmp" | grep -q '%PDF-'; then
+                mv "out/$id.tmp" "out/$id.pdf"
+                echo "SUCCESS $id $(stat -c%s out/$id.pdf)"
+                return 0
+              fi
+              echo "NOTPDF $id $(file out/$id.tmp)"
+            fi
+            rm -f "out/$id.tmp"
+            return 1
+          }
+
+          fetch W20 'https://www.researchgate.net/publication/325109145_Cumulative_Global_Forest_Carbon_Implications_of_Regional_Bioenergy_Expansion_Policies/fulltext/5bad05f292851ca9ed2a49a6/Cumulative-Global-Forest-Carbon-Implications-of-Regional-Bioenergy-Expansion-Policies.pdf' 'https://www.researchgate.net/publication/325109145_Cumulative_Global_Forest_Carbon_Implications_of_Regional_Bioenergy_Expansion_Policies' || true
+          fetch W07 'https://www.researchgate.net/publication/305801682_Climate_change_mitigation_potential_of_local_use_of_harvest_residues_for_bioenergy_in_Canada/fulltext/581bd9da08ae40da2ca923ff/Climate-change-mitigation-potential-of-local-use-of-harvest-residues-for-bioenergy-in-Canada.pdf' 'https://www.researchgate.net/publication/305801682_Climate_change_mitigation_potential_of_local_use_of_harvest_residues_for_bioenergy_in_Canada' || true
+          fetch W45 'https://www.researchgate.net/publication/276074355_Forest_Biomass_Energy_Assessing_Atmospheric_Carbon_Impacts_by_Discounting_Future_Carbon_Flows/fulltext/5812f46408ae29942f3e9944/Forest-Biomass-Energy-Assessing-Atmospheric-Carbon-Impacts-by-Discounting-Future-Carbon-Flows.pdf' 'https://www.researchgate.net/publication/276074355_Forest_Biomass_Energy_Assessing_Atmospheric_Carbon_Impacts_by_Discounting_Future_Carbon_Flows' || true
+          fetch W41 'https://www.cell.com/action/showPdf?pii=S2542-4351%2823%2900537-8' 'https://www.cell.com/joule/fulltext/S2542-4351(23)00537-8' || true
+          fetch W43 'https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/pdf/nihms1561041.pdf' 'https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/' || true
+          fetch W18 'https://ageconsearch.umn.edu/record/150293/files/Baker%20et%20al_AAEA%202013_A%20multi-sector%20intertemporal%20optimization%20approach%20to%20assess%20the%20GHG%20implications%20of%20U.S.%20forest%20and%20agricultural%20biomass%20electricity%20expansion.pdf?download=1' 'https://ageconsearch.umn.edu/record/150293' || true
+
+          # Try to discover ResearchGate direct PDF URLs from pages for W39 and W52.
+          for spec in             'W39|https://www.researchgate.net/publication/369244123_Diverting_residual_biomass_to_energy_use_Quantifying_the_global_warming_potential_of_biogenic_CO_2_GWP_bCO2'             'W52|https://www.researchgate.net/publication/391804775_Assessing_GHG_Emissions_Implications_of_Forest_Residue_Use_for_Energy_Production'
+          do
+            id="${spec%%|*}"; page="${spec#*|}"
+            curl -L --retry 2 --http1.1 -A "$UA" -o "out/$id.html" "$page" || true
+            python - "$id" "$page" <<'PY'
+import sys,re,html
+from pathlib import Path
+rid,page=sys.argv[1:3]
+p=Path('out')/(rid+'.html')
+if not p.exists(): raise SystemExit
+s=html.unescape(p.read_text(errors='ignore')).replace('\\u002F','/').replace('\\/','/')
+urls=re.findall(r'https?://[^"\'<> ]+/fulltext/[^"\'<> ]+\.pdf(?:\?[^"\'<> ]*)?',s)
+for u in urls[:20]: print(rid+'|'+u)
+PY
+          done > out/discovered.txt || true
+
+          if [ -s out/discovered.txt ]; then
+            while IFS='|' read -r id url; do
+              [ -f "out/$id.pdf" ] && continue
+              fetch "$id" "$url" || true
+            done < out/discovered.txt
+          fi
+
+          rm -f out/*.html out/*.tmp
+          python - <<'PY'
+from pathlib import Path
+from pypdf import PdfReader
+import subprocess,sys,os
+for p in sorted(Path('out').glob('*.pdf')):
+    try:
+        n=len(PdfReader(str(p),strict=False).pages)
+        print(p.name,n,p.stat().st_size)
+    except Exception as e:
+        print('BAD',p,e); p.unlink()
+PY
+          printf 'recovery run\n' > out/README.txt
+
+      - name: Validate
+        run: python -m pip install --quiet pypdf && python - <<'PY'
+from pathlib import Path
+from pypdf import PdfReader
+for p in Path('out').glob('*.pdf'):
+    print(p.name,len(PdfReader(str(p),strict=False).pages))
+PY
+      - name: Zip
+        run: zip -9 -r curl_recovery.zip out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LCA-Curl-Recovery
+          path: curl_recovery.zip
+          retention-days: 7
