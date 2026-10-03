@@ -1,0 +1,141 @@
+name: Recover institutional LCA copies
+
+on:
+  push:
+    paths:
+      - '.github/workflows/institutional-lca-recovery.yml'
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tools
+        run: |
+          python -m pip install --quiet pypdf
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils >/dev/null
+      - name: Download and extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out src
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36'
+          get () {
+            out="$1"; shift
+            for u in "$@"; do
+              echo "GET $out $u"
+              if curl -L --fail --retry 4 --retry-delay 2 --connect-timeout 30 --max-time 240 -A "$UA" -o "$out.tmp" "$u"; then
+                if head -c 5 "$out.tmp" | grep -q '%PDF-'; then mv "$out.tmp" "$out"; return 0; fi
+              fi
+              rm -f "$out.tmp"
+            done
+            return 1
+          }
+
+          # W28: author's openly deposited dissertation; Chapter III contains the published article.
+          get src/W28_thesis.pdf \
+            'https://tesisenred.net/bitstream/handle/10803/48708/npm1de1.pdf?isAllowed=y&sequence=1' \
+            'https://www.tdx.cat/bitstream/handle/10803/48708/npm1de1.pdf?sequence=1&isAllowed=y' || true
+
+          # W38: author's openly deposited doctoral dissertation centered on the exact study.
+          get src/W38_thesis.pdf \
+            'https://lutpub.lut.fi/bitstream/handle/10024/92496/isbn9789522654496.pdf?sequence=2&isAllowed=y' \
+            'https://lutpub.lut.fi/bitstream/handle/10024/92496/isbn9789522654496.pdf?sequence=1&isAllowed=y' \
+            'https://lutpub.lut.fi/bitstream/10024/92496/1/isbn9789522654496.pdf' || true
+
+          # W40: public Academia download endpoint advertised as "Download free PDF".
+          get src/W40.pdf \
+            'https://www.academia.edu/attachments/53330556/download_file?s=profile' || true
+
+          python - <<'PY'
+from pathlib import Path
+from pypdf import PdfReader,PdfWriter
+import re,json
+
+def pagetext(reader,i):
+    try:return (reader.pages[i].extract_text() or "")
+    except:return ""
+
+manifest=[]
+
+# W28: locate the article/chapter title and extract until next chapter marker.
+p=Path("src/W28_thesis.pdf")
+if p.exists():
+    r=PdfReader(str(p),strict=False)
+    target="Environmental assessment of post-consumer wood and forest residues"
+    hits=[i for i in range(len(r.pages)) if target.lower() in pagetext(r,i).lower()]
+    print("W28 hits",hits)
+    start=None
+    if hits:
+        # Ignore table-of-contents hits by choosing the last early/full-title occurrence before body.
+        for i in hits:
+            txt=pagetext(r,i).lower()
+            if "chapter iii" in txt or "environmental assessment" in txt:
+                start=i
+        if start is None:start=hits[-1]
+    if start is not None:
+        end=None
+        for j in range(start+1,min(len(r.pages),start+80)):
+            t=pagetext(r,j).lower()
+            if re.search(r'chapter\s+iv',t):
+                end=j;break
+        if end is None:end=min(len(r.pages),start+20)
+        w=PdfWriter()
+        for i in range(start,end):w.add_page(r.pages[i])
+        o=Path("out/W28.pdf")
+        with o.open("wb") as f:w.write(f)
+        check=PdfReader(str(o),strict=False)
+        manifest.append({"id":"W28","source":"open author dissertation chapter","pages":len(check.pages),"source_pages":[start+1,end]})
+
+# W38: if the exact journal article appears in the dissertation, extract its article section;
+# otherwise retain the dissertation as a clearly named supporting source.
+p=Path("src/W38_thesis.pdf")
+if p.exists():
+    r=PdfReader(str(p),strict=False)
+    exact="Greenhouse gas emissions of forest bioenergy supply and utilization in Finland"
+    hits=[i for i in range(len(r.pages)) if exact.lower() in pagetext(r,i).lower()]
+    print("W38 hits",hits)
+    if hits:
+        start=hits[-1]
+        # look for next included-paper title/section, otherwise take through article-length window
+        end=min(len(r.pages),start+25)
+        for j in range(start+2,min(len(r.pages),start+40)):
+            t=pagetext(r,j).lower()
+            if ("article" in t[:300] or "publication" in t[:300]) and exact.lower() not in t and j>start+8:
+                end=j;break
+        w=PdfWriter()
+        for i in range(start,end):w.add_page(r.pages[i])
+        o=Path("out/W38.pdf")
+        with o.open("wb") as f:w.write(f)
+        manifest.append({"id":"W38","source":"open author dissertation containing exact paper/title","pages":len(PdfReader(str(o),strict=False).pages),"source_pages":[start+1,end]})
+    else:
+        o=Path("out/W38_supporting_dissertation.pdf");o.write_bytes(p.read_bytes())
+        manifest.append({"id":"W38_supporting_dissertation","source":"open author dissertation; exact article not separately embedded","pages":len(r.pages)})
+
+# W40 is already exact paper if valid.
+p=Path("src/W40.pdf")
+if p.exists():
+    r=PdfReader(str(p),strict=False)
+    txt=" ".join(pagetext(r,i) for i in range(min(3,len(r.pages))))
+    if "Scenario uncertainties in estimating direct land-use change" in txt:
+        Path("out/W40.pdf").write_bytes(p.read_bytes())
+        manifest.append({"id":"W40","source":"Academia public download","pages":len(r.pages)})
+
+Path("out/manifest.json").write_text(json.dumps(manifest,indent=2))
+print(json.dumps(manifest,indent=2))
+PY
+          for f in out/*.pdf; do
+            [ -e "$f" ] || continue
+            echo "$(basename "$f") $(pdfinfo "$f" | awk '/^Pages:/ {print $2}') pages $(stat -c%s "$f") bytes"
+            pdftotext -f 1 -l 2 "$f" - | head -30 || true
+          done
+      - name: Package
+        run: zip -9 -r institutional_recovery.zip out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Institutional-LCA-Recovery
+          path: institutional_recovery.zip
+          retention-days: 7
