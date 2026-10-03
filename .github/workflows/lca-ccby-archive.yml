@@ -1,8 +1,10 @@
 name: Archive CC BY LCA full texts
+
 on:
   push:
     paths:
       - '.github/workflows/lca-ccby-archive.yml'
+
 jobs:
   archive:
     runs-on: ubuntu-latest
@@ -14,7 +16,7 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import requests, re, json
+          import requests, json
           from pathlib import Path
           out=Path("out"); out.mkdir(exist_ok=True)
           items={
@@ -31,25 +33,27 @@ jobs:
             u="https://r.jina.ai/"+src
             try:
               r=s.get(u,timeout=120)
-              text=r.text
-              ok=r.status_code==200 and len(text)>10000 and title.lower().split(":")[0][:35] in text.lower()
-              print(id,r.status_code,len(text),ok,flush=True)
+              body=r.text
+              needle=title.lower().split(":")[0][:35]
+              ok=r.status_code==200 and len(body)>10000 and needle in body.lower()
+              print(id,r.status_code,len(body),ok,flush=True)
               if not ok:
-                rows.append({"id":id,"status":"FAILED","bytes":len(text),"sample":text[:250]})
+                rows.append({"id":id,"status":"FAILED","bytes":len(body),"sample":body[:250]})
                 continue
-              header=f"""# {title}
-
-**Corpus ID:** {id}  
-**DOI:** https://doi.org/{doi}  
-**Original publisher page:** {src}  
-**License:** Creative Commons Attribution 4.0 (CC BY 4.0), as stated by the publisher/author full-text record.  
-**Archive note:** This is a searchable text/Markdown archival rendering of the openly licensed article, retained for the private LCA App Project source library. It is not the publisher-layout PDF.
-
----
-
-"""
-              p=out/f"{id}_fulltext_CC-BY.md"
-              p.write_text(header+text,encoding="utf-8")
+              header="\n".join([
+                "# "+title,
+                "",
+                "**Corpus ID:** "+id+"  ",
+                "**DOI:** https://doi.org/"+doi+"  ",
+                "**Original publisher page:** "+src+"  ",
+                "**License:** Creative Commons Attribution 4.0 (CC BY 4.0), as stated by the publisher/author full-text record.  ",
+                "**Archive note:** Searchable text/Markdown archival rendering of the openly licensed article for the private LCA App Project. It is not the publisher-layout PDF.",
+                "",
+                "---",
+                "",
+              ])
+              p=out/(id+"_fulltext_CC-BY.md")
+              p.write_text(header+body,encoding="utf-8")
               rows.append({"id":id,"status":"RECOVERED_FULLTEXT","file":p.name,"bytes":p.stat().st_size})
             except Exception as e:
               rows.append({"id":id,"status":"FAILED","error":repr(e)})
