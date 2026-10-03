@@ -81,11 +81,11 @@ jobs:
             [ -e "$p" ] || continue
             echo "$(basename "$p") $(pdfinfo "$p" | awk '/^Pages:/ {print $2}') pages $(stat -c%s "$p") bytes"
           done
-          cat > out/manifest.txt <<EOF
-Browser recovery. Each PDF was validated by page count and title text.
-Files produced from an original PDF endpoint are source PDFs rendered by Chrome.
-Fallback page prints are used only for publicly available PMC/open-access full-text pages.
-EOF
+          printf '%s\n' \
+            'Browser recovery. Each PDF was validated by page count and title text.' \
+            'Files produced from an original PDF endpoint are source PDFs rendered by Chrome.' \
+            'Fallback page prints are used only for publicly available PMC/open-access full-text pages.' \
+            > out/manifest.txt
       - name: Zip
         run: zip -9 -r browser_recovery.zip out
       - uses: actions/upload-artifact@v4
