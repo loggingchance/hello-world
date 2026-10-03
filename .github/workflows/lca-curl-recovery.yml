@@ -9,6 +9,8 @@ jobs:
   recover:
     runs-on: ubuntu-latest
     steps:
+      - name: Install validator
+        run: python -m pip install --quiet pypdf
       - name: Recover
         shell: bash
         run: |
