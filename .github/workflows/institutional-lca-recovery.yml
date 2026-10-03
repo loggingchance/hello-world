@@ -1,4 +1,4 @@
-name: Recover institutional LCA copies
+name: Institutional LCA recovery simple
 
 on:
   push:
@@ -9,12 +9,8 @@ jobs:
   recover:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install tools
+      - name: Install
         run: |
-          python -m pip install --quiet pypdf
           sudo apt-get update -qq
           sudo apt-get install -y -qq poppler-utils >/dev/null
       - name: Download and extract
@@ -22,116 +18,52 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out src
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36'
-          get () {
-            out="$1"; shift
-            for u in "$@"; do
-              echo "GET $out $u"
-              if curl -L --fail --retry 4 --retry-delay 2 --connect-timeout 30 --max-time 240 -A "$UA" -o "$out.tmp" "$u"; then
-                if head -c 5 "$out.tmp" | grep -q '%PDF-'; then mv "$out.tmp" "$out"; return 0; fi
-              fi
-              rm -f "$out.tmp"
+          UA='Mozilla/5.0'
+          getpdf() {
+            dest="$1"; shift
+            for url in "$@"; do
+              echo "GET $url"
+              curl -L --fail --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 240 -A "$UA" -o "$dest.tmp" "$url" || true
+              if [ -s "$dest.tmp" ] && head -c 5 "$dest.tmp" | grep -q '%PDF-'; then mv "$dest.tmp" "$dest"; return 0; fi
+              rm -f "$dest.tmp"
             done
             return 1
           }
 
-          # W28: author's openly deposited dissertation; Chapter III contains the published article.
-          get src/W28_thesis.pdf \
-            'https://tesisenred.net/bitstream/handle/10803/48708/npm1de1.pdf?isAllowed=y&sequence=1' \
-            'https://www.tdx.cat/bitstream/handle/10803/48708/npm1de1.pdf?sequence=1&isAllowed=y' || true
+          getpdf src/W28_thesis.pdf 'https://tesisenred.net/bitstream/handle/10803/48708/npm1de1.pdf?isAllowed=y&sequence=1' 'https://www.tdx.cat/bitstream/handle/10803/48708/npm1de1.pdf?sequence=1&isAllowed=y' || true
+          getpdf src/W38_thesis.pdf 'https://lutpub.lut.fi/bitstream/handle/10024/92496/isbn9789522654496.pdf?sequence=2&isAllowed=y' 'https://lutpub.lut.fi/bitstream/handle/10024/92496/isbn9789522654496.pdf?sequence=1&isAllowed=y' || true
+          getpdf src/W40.pdf 'https://www.academia.edu/attachments/53330556/download_file?s=profile' || true
 
-          # W38: author's openly deposited doctoral dissertation centered on the exact study.
-          get src/W38_thesis.pdf \
-            'https://lutpub.lut.fi/bitstream/handle/10024/92496/isbn9789522654496.pdf?sequence=2&isAllowed=y' \
-            'https://lutpub.lut.fi/bitstream/handle/10024/92496/isbn9789522654496.pdf?sequence=1&isAllowed=y' \
-            'https://lutpub.lut.fi/bitstream/10024/92496/1/isbn9789522654496.pdf' || true
+          extract_by_title() {
+            infile="$1"; outfile="$2"; title="$3"; nextpat="$4"; maxpages="$5"
+            [ -f "$infile" ] || return 0
+            n=$(pdfinfo "$infile" | awk '/^Pages:/ {print $2}')
+            start=''
+            for i in $(seq 1 "$n"); do
+              if pdftotext -f "$i" -l "$i" "$infile" - 2>/dev/null | tr '\n' ' ' | grep -Fqi "$title"; then start="$i"; fi
+            done
+            echo "$outfile start=$start total=$n"
+            [ -n "$start" ] || return 0
+            end=$((start+maxpages-1)); [ "$end" -gt "$n" ] && end="$n"
+            for j in $(seq $((start+2)) "$end"); do
+              if pdftotext -f "$j" -l "$j" "$infile" - 2>/dev/null | tr '\n' ' ' | grep -Eqi "$nextpat"; then end=$((j-1)); break; fi
+            done
+            mkdir -p split
+            rm -f split/*.pdf
+            pdfseparate -f "$start" -l "$end" "$infile" 'split/page-%d.pdf'
+            pdfunite $(find split -name 'page-*.pdf' | sort -V) "$outfile"
+            echo "EXTRACTED $outfile pages $(pdfinfo "$outfile" | awk '/^Pages:/ {print $2}')"
+          }
 
-          # W40: public Academia download endpoint advertised as "Download free PDF".
-          get src/W40.pdf \
-            'https://www.academia.edu/attachments/53330556/download_file?s=profile' || true
+          extract_by_title src/W28_thesis.pdf out/W28.pdf 'Environmental assessment of post-consumer wood and forest residues' 'CHAPTER[[:space:]]+IV|Chapter[[:space:]]+IV' 35
+          extract_by_title src/W38_thesis.pdf out/W38.pdf 'Greenhouse gas emissions of forest bioenergy supply and utilization in Finland' 'PUBLICATION|ARTICLE[[:space:]]+[IVX]|CHAPTER[[:space:]]+[IVX]' 30
 
-          python - <<'PY'
-from pathlib import Path
-from pypdf import PdfReader,PdfWriter
-import re,json
+          if [ -f src/W40.pdf ]; then
+            if pdftotext -f 1 -l 3 src/W40.pdf - 2>/dev/null | grep -Fqi 'Scenario uncertainties in estimating direct land-use change'; then cp src/W40.pdf out/W40.pdf; fi
+          fi
 
-def pagetext(reader,i):
-    try:return (reader.pages[i].extract_text() or "")
-    except:return ""
-
-manifest=[]
-
-# W28: locate the article/chapter title and extract until next chapter marker.
-p=Path("src/W28_thesis.pdf")
-if p.exists():
-    r=PdfReader(str(p),strict=False)
-    target="Environmental assessment of post-consumer wood and forest residues"
-    hits=[i for i in range(len(r.pages)) if target.lower() in pagetext(r,i).lower()]
-    print("W28 hits",hits)
-    start=None
-    if hits:
-        # Ignore table-of-contents hits by choosing the last early/full-title occurrence before body.
-        for i in hits:
-            txt=pagetext(r,i).lower()
-            if "chapter iii" in txt or "environmental assessment" in txt:
-                start=i
-        if start is None:start=hits[-1]
-    if start is not None:
-        end=None
-        for j in range(start+1,min(len(r.pages),start+80)):
-            t=pagetext(r,j).lower()
-            if re.search(r'chapter\s+iv',t):
-                end=j;break
-        if end is None:end=min(len(r.pages),start+20)
-        w=PdfWriter()
-        for i in range(start,end):w.add_page(r.pages[i])
-        o=Path("out/W28.pdf")
-        with o.open("wb") as f:w.write(f)
-        check=PdfReader(str(o),strict=False)
-        manifest.append({"id":"W28","source":"open author dissertation chapter","pages":len(check.pages),"source_pages":[start+1,end]})
-
-# W38: if the exact journal article appears in the dissertation, extract its article section;
-# otherwise retain the dissertation as a clearly named supporting source.
-p=Path("src/W38_thesis.pdf")
-if p.exists():
-    r=PdfReader(str(p),strict=False)
-    exact="Greenhouse gas emissions of forest bioenergy supply and utilization in Finland"
-    hits=[i for i in range(len(r.pages)) if exact.lower() in pagetext(r,i).lower()]
-    print("W38 hits",hits)
-    if hits:
-        start=hits[-1]
-        # look for next included-paper title/section, otherwise take through article-length window
-        end=min(len(r.pages),start+25)
-        for j in range(start+2,min(len(r.pages),start+40)):
-            t=pagetext(r,j).lower()
-            if ("article" in t[:300] or "publication" in t[:300]) and exact.lower() not in t and j>start+8:
-                end=j;break
-        w=PdfWriter()
-        for i in range(start,end):w.add_page(r.pages[i])
-        o=Path("out/W38.pdf")
-        with o.open("wb") as f:w.write(f)
-        manifest.append({"id":"W38","source":"open author dissertation containing exact paper/title","pages":len(PdfReader(str(o),strict=False).pages),"source_pages":[start+1,end]})
-    else:
-        o=Path("out/W38_supporting_dissertation.pdf");o.write_bytes(p.read_bytes())
-        manifest.append({"id":"W38_supporting_dissertation","source":"open author dissertation; exact article not separately embedded","pages":len(r.pages)})
-
-# W40 is already exact paper if valid.
-p=Path("src/W40.pdf")
-if p.exists():
-    r=PdfReader(str(p),strict=False)
-    txt=" ".join(pagetext(r,i) for i in range(min(3,len(r.pages))))
-    if "Scenario uncertainties in estimating direct land-use change" in txt:
-        Path("out/W40.pdf").write_bytes(p.read_bytes())
-        manifest.append({"id":"W40","source":"Academia public download","pages":len(r.pages)})
-
-Path("out/manifest.json").write_text(json.dumps(manifest,indent=2))
-print(json.dumps(manifest,indent=2))
-PY
-          for f in out/*.pdf; do
-            [ -e "$f" ] || continue
-            echo "$(basename "$f") $(pdfinfo "$f" | awk '/^Pages:/ {print $2}') pages $(stat -c%s "$f") bytes"
-            pdftotext -f 1 -l 2 "$f" - | head -30 || true
-          done
+          for f in out/*.pdf; do [ -e "$f" ] || continue; echo "$(basename "$f") $(pdfinfo "$f" | awk '/^Pages:/ {print $2}') pages $(stat -c%s "$f") bytes"; done
+          printf 'Institutional repository recovery.\n' > out/README.txt
       - name: Package
         run: zip -9 -r institutional_recovery.zip out
       - uses: actions/upload-artifact@v4
