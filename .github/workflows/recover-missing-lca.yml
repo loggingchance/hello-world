@@ -1,0 +1,211 @@
+name: Recover missing LCA PDFs
+
+on:
+  push:
+    paths:
+      - '.github/workflows/recover-missing-lca.yml'
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: python -m pip install --quiet requests beautifulsoup4 pypdf
+      - name: Recover
+        shell: bash
+        run: |
+          cat > /tmp/recover.py <<'PY'
+          import re, html, json, hashlib, tarfile, tempfile, time
+          from pathlib import Path
+          from urllib.parse import urljoin, quote
+          import requests
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+
+          out=Path("recovered")
+          pdfdir=out/"reports"; pdfdir.mkdir(parents=True,exist_ok=True)
+          s=requests.Session()
+          s.headers.update({
+              "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+              "Accept":"application/pdf,text/html,*/*;q=0.8",
+              "Accept-Language":"en-US,en;q=0.9",
+          })
+          manifest=[]
+
+          def save(rid,b,url,method):
+              if not (len(b)>5000 and b[:5]==b"%PDF-"): return None
+              p=pdfdir/f"{rid}.pdf"; p.write_bytes(b)
+              try:
+                  pages=len(PdfReader(str(p),strict=False).pages)
+                  if pages < 1: raise ValueError("zero pages")
+              except Exception:
+                  p.unlink(missing_ok=True); return None
+              return {"id":rid,"status":"DOWNLOADED","pages":pages,"bytes":len(b),
+                      "sha256":hashlib.sha256(b).hexdigest(),"source_url":url,"method":method}
+
+          def try_pdf(rid,url,method,referer=None):
+              try:
+                  h={}
+                  if referer: h["Referer"]=referer
+                  r=s.get(url,headers=h,timeout=120,allow_redirects=True)
+                  got=save(rid,r.content,r.url,method)
+                  if got: return got
+              except Exception:
+                  pass
+              return None
+
+          def rg_discover(rid,pageurl):
+              try:
+                  r=s.get(pageurl,timeout=90,allow_redirects=True)
+                  txt=html.unescape(r.text).replace("\\u002F","/").replace("\\/","/")
+                  soup=BeautifulSoup(txt,"html.parser")
+                  urls=[]
+                  for a in soup.find_all("a",href=True):
+                      u=urljoin(r.url,a["href"])
+                      if ".pdf" in u.lower() and ("fulltext" in u.lower() or "researchgate" in u.lower()):
+                          urls.append(u)
+                  urls += re.findall(r'https?://[^"\'<> ]+/fulltext/[^"\'<> ]+\.pdf(?:\?[^"\'<> ]*)?',txt)
+                  seen=set()
+                  for u in urls:
+                      if u in seen: continue
+                      seen.add(u)
+                      got=try_pdf(rid,u,"ResearchGate public full text",pageurl)
+                      if got: return got
+              except Exception:
+                  pass
+              return None
+
+          def pmc_recover(rid,pmcid):
+              # Try standard endpoints
+              for u in [
+                  f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/",
+                  f"https://europepmc.org/articles/{pmcid}?pdf=render",
+              ]:
+                  got=try_pdf(rid,u,"PMC/EuropePMC author manuscript")
+                  if got: return got
+              # NCBI OA package
+              try:
+                  api=f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}"
+                  r=s.get(api,timeout=60)
+                  if r.ok:
+                      for m in re.finditer(r'href="([^"]+)"\s+format="(pdf|tgz)"',r.text):
+                          href,fmt=m.group(1),m.group(2)
+                          if href.startswith("ftp://"):
+                              href="https://ftp.ncbi.nlm.nih.gov"+href.split("ftp.ncbi.nlm.nih.gov",1)[-1]
+                          if fmt=="pdf":
+                              got=try_pdf(rid,href,"NCBI OA PDF")
+                              if got: return got
+                          else:
+                              rr=s.get(href,timeout=120)
+                              if rr.ok:
+                                  with tempfile.TemporaryDirectory() as td:
+                                      tgz=Path(td)/"x.tgz"; tgz.write_bytes(rr.content)
+                                      try:
+                                          with tarfile.open(tgz,"r:gz") as tf: tf.extractall(td)
+                                          for p in Path(td).rglob("*.pdf"):
+                                              got=save(rid,p.read_bytes(),href,"NCBI OA package")
+                                              if got: return got
+                                      except Exception: pass
+              except Exception: pass
+              return None
+
+          targets = [
+              ("W18","direct","https://ageconsearch.umn.edu/record/150293/files/Baker%20et%20al_AAEA%202013_A%20multi-sector%20intertemporal%20optimization%20approach%20to%20assess%20the%20GHG%20implications%20of%20U.S.%20forest%20and%20agricultural%20biomass%20electricity%20expansion.pdf"),
+              ("W20","pmc","PMC6145497"),
+              ("W43","pmc","PMC7065381"),
+              ("W41","direct","https://www.sciencedirect.com/science/article/pii/S2542435123005378/pdfft?isDTMRedir=true&download=true"),
+              ("W31","direct","https://www.sciencedirect.com/science/article/am/pii/S0959652617304614"),
+              ("W31","direct","https://www.sciencedirect.com/science/article/pii/S0959652617304614/pdfft?isDTMRedir=true&download=true"),
+              ("W07","wiley","10.1111/gcbb.12387"),
+              ("W39","wiley","10.1111/gcbb.13048"),
+              ("W45","wiley","10.1111/gcbb.12276"),
+              ("W52","wiley","10.1111/gcbb.70045"),
+              ("W07","rg","https://www.researchgate.net/publication/305801682_Climate_change_mitigation_potential_of_local_use_of_harvest_residues_for_bioenergy_in_Canada"),
+              ("W39","rg","https://www.researchgate.net/publication/369244123_Diverting_residual_biomass_to_energy_use_Quantifying_the_global_warming_potential_of_biogenic_CO_2_GWP_bCO2"),
+              ("W45","rg","https://www.researchgate.net/publication/276074355_Forest_Biomass_Energy_Assessing_Atmospheric_Carbon_Impacts_by_Discounting_Future_Carbon_Flows"),
+              ("W52","rg","https://www.researchgate.net/publication/391804775_Assessing_GHG_Emissions_Implications_of_Forest_Residue_Use_for_Energy_Production"),
+              ("W48","direct","https://handle.nal.usda.gov/10113/6829271"),
+          ]
+
+          done=set()
+          for rid,kind,val in targets:
+              if rid in done: continue
+              print("TRY",rid,kind,val,flush=True)
+              got=None
+              if kind=="direct":
+                  got=try_pdf(rid,val,"direct public/open endpoint")
+              elif kind=="pmc":
+                  got=pmc_recover(rid,val)
+              elif kind=="wiley":
+                  for u in [
+                      f"https://onlinelibrary.wiley.com/doi/pdfdirect/{val}",
+                      f"https://onlinelibrary.wiley.com/doi/epdf/{val}",
+                      f"https://onlinelibrary.wiley.com/doi/pdf/{val}",
+                  ]:
+                      got=try_pdf(rid,u,"Wiley open-access PDF")
+                      if got: break
+              elif kind=="rg":
+                  got=rg_discover(rid,val)
+              if got:
+                  manifest.append(got); done.add(rid)
+                  print("SUCCESS",rid,got["pages"],got["source_url"],flush=True)
+
+          # USDA NAL W48: inspect landing page for downloadable PDF links
+          if "W48" not in done:
+              try:
+                  r=s.get("https://handle.nal.usda.gov/10113/6829271",timeout=90,allow_redirects=True)
+                  soup=BeautifulSoup(r.text,"html.parser")
+                  for a in soup.find_all("a",href=True):
+                      u=urljoin(r.url,a["href"])
+                      txt=" ".join(a.stripped_strings).lower()
+                      if ".pdf" in u.lower() or "download" in txt or "full text" in txt:
+                          got=try_pdf("W48",u,"USDA NAL repository",r.url)
+                          if got:
+                              manifest.append(got); done.add("W48"); print("SUCCESS W48",got["pages"],got["source_url"],flush=True); break
+              except Exception: pass
+
+          # ScienceDirect open manuscript HTML may expose downloadable manuscript link
+          if "W31" not in done:
+              try:
+                  r=s.get("https://www.sciencedirect.com/science/article/pii/S0959652617304614",timeout=90)
+                  txt=html.unescape(r.text).replace("\\/","/")
+                  soup=BeautifulSoup(txt,"html.parser")
+                  urls=[]
+                  for a in soup.find_all("a",href=True):
+                      u=urljoin(r.url,a["href"])
+                      t=" ".join(a.stripped_strings).lower()
+                      if ".pdf" in u.lower() or "manuscript" in t or "pdf" in t:
+                          urls.append(u)
+                  for u in urls:
+                      got=try_pdf("W31",u,"ScienceDirect open manuscript",r.url)
+                      if got:
+                          manifest.append(got); done.add("W31"); print("SUCCESS W31",got["pages"],got["source_url"],flush=True); break
+              except Exception: pass
+
+          # Write failures for target IDs not recovered.
+          target_ids=sorted(set(x[0] for x in targets))
+          for rid in target_ids:
+              if rid not in done:
+                  manifest.append({"id":rid,"status":"FAILED"})
+
+          out.joinpath("manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
+          import csv
+          with open(out/"manifest.csv","w",newline="",encoding="utf-8") as f:
+              w=csv.DictWriter(f,fieldnames=["id","status","pages","bytes","sha256","source_url","method"],extrasaction="ignore")
+              w.writeheader(); w.writerows(manifest)
+          print("RECOVERED",sorted(done),flush=True)
+          PY
+          python /tmp/recover.py
+
+      - name: Package
+        run: |
+          cd recovered
+          zip -9 -r ../recovered_missing_lca.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Recovered-Missing-LCA
+          path: recovered_missing_lca.zip
+          retention-days: 7
