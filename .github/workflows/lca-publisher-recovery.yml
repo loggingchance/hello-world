@@ -1,0 +1,87 @@
+name: Recover open publisher PDFs
+on:
+  push:
+    paths:
+      - '.github/workflows/lca-publisher-recovery.yml'
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet pypdf
+      - name: Download with sessions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36'
+          wiley () {
+            id="$1"; doi="$2"
+            jar="out/$id.cookies"
+            page="https://onlinelibrary.wiley.com/doi/full/$doi"
+            pdf="https://onlinelibrary.wiley.com/doi/pdf/$doi"
+            curl -L --http1.1 --retry 2 -A "$UA" -c "$jar" -b "$jar" -o /dev/null "$page" || true
+            sleep 1
+            curl -L --http1.1 --retry 3 --retry-delay 1 -A "$UA" -e "$page" -c "$jar" -b "$jar"               -H 'Accept: application/pdf,application/octet-stream;q=0.9,*/*;q=0.5'               -o "out/$id.tmp" "$pdf" || true
+            if [ -s "out/$id.tmp" ] && head -c5 "out/$id.tmp" | grep -q '%PDF-'; then mv "out/$id.tmp" "out/$id.pdf"; echo "OK $id"; else rm -f "out/$id.tmp"; echo "MISS $id"; fi
+            rm -f "$jar"
+          }
+          wiley W07 10.1111/gcbb.12387
+          wiley W39 10.1111/gcbb.13048
+          wiley W45 10.1111/gcbb.12276
+          wiley W52 10.1111/gcbb.70045
+
+          # Cell/Joule open-access article: warm session, then PDF.
+          curl -L --http1.1 --retry 2 -A "$UA" -c out/W41.cookies -b out/W41.cookies -o /dev/null             'https://www.cell.com/joule/fulltext/S2542-4351(23)00537-8' || true
+          curl -L --http1.1 --retry 3 -A "$UA" -e 'https://www.cell.com/joule/fulltext/S2542-4351(23)00537-8'             -c out/W41.cookies -b out/W41.cookies             -o out/W41.tmp 'https://www.cell.com/action/showPdf?pii=S2542-4351%2823%2900537-8' || true
+          if [ -s out/W41.tmp ] && head -c5 out/W41.tmp | grep -q '%PDF-'; then mv out/W41.tmp out/W41.pdf; else rm -f out/W41.tmp; fi
+          rm -f out/W41.cookies
+
+          # Elsevier open manuscript.
+          curl -L --http1.1 --retry 2 -A "$UA" -c out/W31.cookies -b out/W31.cookies -o /dev/null             'https://www.sciencedirect.com/science/article/pii/S0959652617304614' || true
+          for u in             'https://www.sciencedirect.com/science/article/am/pii/S0959652617304614'             'https://www.sciencedirect.com/science/article/pii/S0959652617304614/pdfft?isDTMRedir=true&download=true'
+          do
+            curl -L --http1.1 --retry 2 -A "$UA" -e 'https://www.sciencedirect.com/science/article/pii/S0959652617304614'               -c out/W31.cookies -b out/W31.cookies -o out/W31.tmp "$u" || true
+            if [ -s out/W31.tmp ] && head -c5 out/W31.tmp | grep -q '%PDF-'; then mv out/W31.tmp out/W31.pdf; break; fi
+            rm -f out/W31.tmp
+          done
+          rm -f out/W31.cookies
+
+          python - <<'PY'
+from pathlib import Path
+from pypdf import PdfReader
+import json,re
+expected={
+"W07":["climate change mitigation potential","harvest residues"],
+"W31":["life cycle assessment of co-firing","wood pellets"],
+"W39":["diverting residual biomass","biogenic"],
+"W41":["soil organic carbon change","forest residues"],
+"W45":["forest biomass energy","discounting future carbon flows"],
+"W52":["assessing ghg emissions implications","forest residue"],
+}
+rows=[]
+for id,terms in expected.items():
+ p=Path("out")/(id+".pdf")
+ if not p.exists():
+  rows.append({"id":id,"status":"FAILED"}); continue
+ try:
+  r=PdfReader(str(p),strict=False); pages=len(r.pages)
+  text="\n".join((pg.extract_text() or "") for pg in r.pages[:12]).lower()
+  ok=all(t in text for t in terms)
+  if ok: rows.append({"id":id,"status":"RECOVERED","pages":pages,"bytes":p.stat().st_size})
+  else:
+   rows.append({"id":id,"status":"FAILED_VALIDATION","pages":pages,"sample":re.sub(r"\s+"," ",text[:400])})
+   p.unlink()
+ except Exception as e:
+  rows.append({"id":id,"status":"FAILED_VALIDATION","reason":str(e)}); p.unlink(missing_ok=True)
+Path("out/manifest.json").write_text(json.dumps(rows,indent=2))
+print(json.dumps(rows,indent=2))
+PY
+      - run: zip -9 -r publisher_recovery.zip out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LCA-Publisher-Recovery
+          path: publisher_recovery.zip
+          retention-days: 7
