@@ -1,0 +1,85 @@
+name: Browser cookie LCA recovery
+
+on:
+  push:
+    paths:
+      - '.github/workflows/browser-cookie-lca.yml'
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: |
+          python -m pip install --quiet selenium requests pypdf
+      - name: Recover exact open PDFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          from pathlib import Path
+          import time, requests, json, hashlib, os
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from pypdf import PdfReader
+
+          out=Path("out")
+          opts=Options()
+          opts.add_argument("--headless=new")
+          opts.add_argument("--no-sandbox")
+          opts.add_argument("--disable-dev-shm-usage")
+          opts.add_argument("--disable-gpu")
+          opts.add_argument("--window-size=1440,1200")
+          driver=webdriver.Chrome(options=opts)
+
+          targets=[
+            ("W07","https://onlinelibrary.wiley.com/doi/full/10.1111/gcbb.12387","https://onlinelibrary.wiley.com/doi/pdf/10.1111/gcbb.12387","Climate change mitigation potential"),
+            ("W45","https://onlinelibrary.wiley.com/doi/full/10.1111/gcbb.12276","https://onlinelibrary.wiley.com/doi/pdf/10.1111/gcbb.12276","Forest biomass energy"),
+            ("W52","https://onlinelibrary.wiley.com/doi/10.1111/gcbb.70045","https://onlinelibrary.wiley.com/doi/pdf/10.1111/gcbb.70045","Assessing GHG Emissions Implications"),
+            ("W41","https://www.sciencedirect.com/science/article/pii/S2542435123005378","https://www.sciencedirect.com/science/article/pii/S2542435123005378/pdfft?isDTMRedir=true&download=true","Soil organic carbon change"),
+            ("W31","https://www.sciencedirect.com/science/article/pii/S0959652617304614","https://www.sciencedirect.com/science/article/pii/S0959652617304614/pdfft?isDTMRedir=true&download=true","Life cycle assessment of co-firing"),
+          ]
+          rows=[]
+          for rid,page,pdf,title in targets:
+            try:
+              print("WARM",rid,page,flush=True)
+              driver.get(page)
+              time.sleep(5)
+              cookies=driver.get_cookies()
+              ua=driver.execute_script("return navigator.userAgent")
+              sess=requests.Session()
+              sess.headers.update({"User-Agent":ua,"Referer":page,"Accept":"application/pdf,*/*;q=0.9"})
+              for c in cookies:
+                sess.cookies.set(c["name"],c["value"],domain=c.get("domain"),path=c.get("path","/"))
+              r=sess.get(pdf,timeout=120,allow_redirects=True)
+              print("GET",rid,r.status_code,r.url,r.headers.get("content-type"),len(r.content),flush=True)
+              if r.status_code==200 and r.content.startswith(b"%PDF-") and len(r.content)>5000:
+                p=out/f"{rid}.pdf"; p.write_bytes(r.content)
+                pr=PdfReader(str(p),strict=False); pages=len(pr.pages)
+                text=""
+                for i in range(min(3,pages)):
+                  try:text += pr.pages[i].extract_text() or ""
+                  except:pass
+                if title.lower()[:20] not in text.lower():
+                  print("TITLE CHECK WARN",rid,text[:300],flush=True)
+                rows.append({"id":rid,"status":"DOWNLOADED","pages":pages,"bytes":len(r.content),"url":r.url,"sha256":hashlib.sha256(r.content).hexdigest()})
+              else:
+                rows.append({"id":rid,"status":"FAILED","code":r.status_code,"bytes":len(r.content),"url":r.url})
+            except Exception as e:
+              print("ERR",rid,repr(e),flush=True)
+              rows.append({"id":rid,"status":"FAILED","error":repr(e)})
+          driver.quit()
+          Path("out/manifest.json").write_text(json.dumps(rows,indent=2),encoding="utf-8")
+          print(json.dumps(rows,indent=2))
+          PY
+      - name: Package
+        run: zip -9 -r browser_cookie_recovery.zip out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Browser-Cookie-LCA-Recovery
+          path: browser_cookie_recovery.zip
+          retention-days: 7
