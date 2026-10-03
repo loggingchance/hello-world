@@ -1,0 +1,113 @@
+name: Final LCA source recovery
+
+on:
+  push:
+    paths:
+      - '.github/workflows/lca-final-source-recovery.yml'
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils >/dev/null
+      - name: Retrieve public/open sources
+        shell: bash
+        run: |
+          set -u
+          mkdir -p out raw
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36'
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+
+          validate_pdf () {
+            id="$1"; file="$2"; needle="$3"; label="$4"
+            [ -s "$file" ] || return 1
+            if ! head -c 5 "$file" | grep -q '%PDF-'; then return 1; fi
+            pages=$(pdfinfo "$file" 2>/dev/null | awk '/^Pages:/ {print $2}')
+            [ -n "$pages" ] || return 1
+            pdftotext "$file" "raw/$id.txt" 2>/dev/null || true
+            if [ "$pages" -ge 2 ] && grep -Fqi "$needle" "raw/$id.txt"; then
+              mv "$file" "out/$id.pdf"
+              printf '%s|%s|%s|%s\n' "$id" "$pages" "$label" "$(stat -c%s "out/$id.pdf")" >> out/success.txt
+              echo "SUCCESS $id $pages $label"
+              return 0
+            fi
+            return 1
+          }
+
+          curl_pdf () {
+            id="$1"; url="$2"; needle="$3"; label="$4"
+            [ -f "out/$id.pdf" ] && return 0
+            rm -f "raw/$id.pdf" "raw/$id.txt"
+            echo "CURL $id $url"
+            curl -L --http1.1 --retry 2 --retry-delay 1 --connect-timeout 20 --max-time 120 \
+              -A "$UA" -H 'Accept: application/pdf,text/html,*/*;q=0.8' \
+              -o "raw/$id.pdf" "$url" >/dev/null 2>&1 || true
+            validate_pdf "$id" "raw/$id.pdf" "$needle" "$label" || true
+          }
+
+          browser_page () {
+            id="$1"; url="$2"; needle="$3"; label="$4"
+            [ -f "out/$id.pdf" ] && return 0
+            [ -n "$CHROME" ] || return 0
+            rm -f "raw/$id-page.pdf" "raw/$id.txt"
+            echo "BROWSER $id $url"
+            timeout 120 "$CHROME" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+              --run-all-compositor-stages-before-draw --virtual-time-budget=18000 \
+              --print-to-pdf-no-header --print-to-pdf="raw/$id-page.pdf" "$url" >/dev/null 2>&1 || true
+            validate_pdf "$id" "raw/$id-page.pdf" "$needle" "$label" || true
+          }
+
+          # W27: open NCASI technical report underlying the journal analysis.
+          curl_pdf W27 'https://www.ncasi.org/wp-content/uploads/2019/02/tb984.pdf' 'GREENHOUSE GAS AND NON-RENEWABLE ENERGY BENEFITS' 'NCASI Technical Bulletin 984'
+          curl_pdf W27 'https://ncasi.org/wp-content/uploads/2015/08/tb984.pdf' 'GREENHOUSE GAS AND NON-RENEWABLE ENERGY BENEFITS' 'NCASI Technical Bulletin 984'
+
+          # W15: publisher PDF route.
+          curl_pdf W15 'https://cdnsciencepub.com/doi/pdf/10.1139/cjfr-2014-0210' 'Wood-based bioenergy products' 'publisher PDF'
+          browser_page W15 'https://cdnsciencepub.com/doi/full/10.1139/cjfr-2014-0210' 'Wood-based bioenergy products' 'publisher full-text page'
+
+          # W26, W28, W30, W32, W34, W35 direct publisher PDF routes.
+          curl_pdf W26 'https://www.sciencedirect.com/science/article/pii/0961953495000208/pdfft?isDTMRedir=true&download=true' 'Carbon balance of bioenergy from logging residues' 'publisher PDF'
+          curl_pdf W28 'https://www.sciencedirect.com/science/article/pii/S0961953410001364/pdfft?isDTMRedir=true&download=true' 'Environmental assessment of post-consumer wood' 'publisher PDF'
+          curl_pdf W30 'https://www.sciencedirect.com/science/article/pii/S0961953425006713/pdfft?isDTMRedir=true&download=true' 'Evaluating the environmental impact of electricity generation' 'publisher PDF'
+          curl_pdf W32 'https://www.sciencedirect.com/science/article/pii/S0048969721047914/pdfft?isDTMRedir=true&download=true' 'Environmental impact assessment of biomass supported electricity' 'publisher PDF'
+          curl_pdf W34 'https://www.sciencedirect.com/science/article/pii/S0306261916301416/pdfft?isDTMRedir=true&download=true' 'Integrated techno-economic and environmental assessments' 'publisher PDF'
+          curl_pdf W35 'https://www.sciencedirect.com/science/article/pii/S096014811931883X/pdfft?isDTMRedir=true&download=true' 'Life cycle assessment of power-generation systems' 'publisher PDF'
+
+          # W31/W33: accepted/open manuscript HTML route rendered to PDF.
+          browser_page W31 'https://www.sciencedirect.com/science/article/am/pii/S0959652617304614' 'Life cycle assessment of co-firing coal and wood pellets' 'ScienceDirect open manuscript'
+          browser_page W33 'https://www.sciencedirect.com/science/article/am/pii/S0301421519300060' 'Comparative life cycle assessment of biomass utilization' 'ScienceDirect accepted manuscript'
+
+          # W38: open dissertation closely containing the underlying work.
+          curl_pdf W38 'https://lutpub.lut.fi/bitstream/handle/10024/92496/isbn9789522654496.pdf?sequence=2&isAllowed=y' 'The effects of location, feedstock availability' 'LUT dissertation'
+          curl_pdf W38 'https://www.doria.fi/bitstream/handle/10024/92496/isbn9789522654496.pdf?sequence=2&isAllowed=y' 'The effects of location, feedstock availability' 'LUT dissertation'
+
+          # W40: public Academia download endpoint.
+          curl_pdf W40 'https://www.academia.edu/attachments/53330556/download_file?s=profile' 'Scenario uncertainties in estimating direct land-use' 'author-posted PDF'
+
+          # W41 open access.
+          curl_pdf W41 'https://www.cell.com/action/showPdf?pii=S2542-4351%2823%2900537-8' 'Soil organic carbon change can reduce' 'Joule open-access PDF'
+
+          # W07/W39/W45/W52 Wiley open-access routes.
+          curl_pdf W07 'https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12387' 'Climate change mitigation potential of local use' 'Wiley open-access PDF'
+          curl_pdf W39 'https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.13048' 'Diverting residual biomass to energy use' 'Wiley open-access PDF'
+          curl_pdf W45 'https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.12276' 'Forest biomass energy' 'Wiley open-access PDF'
+          curl_pdf W52 'https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/gcbb.70045' 'Assessing GHG Emissions Implications' 'Wiley open-access PDF'
+
+          # W48: USDA/NAL public record endpoints if file is exposed.
+          browser_page W48 'https://handle.nal.usda.gov/10113/6829271' 'Estimating unit production cost' 'USDA NAL record snapshot'
+
+          # Preserve outcome summary.
+          [ -f out/success.txt ] || touch out/success.txt
+          rm -f raw/*.txt
+          echo "SUCCESS FILES:"
+          cat out/success.txt || true
+      - name: Zip results
+        run: zip -9 -r final_lca_recovery.zip out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Final-LCA-Recovery
+          path: final_lca_recovery.zip
+          retention-days: 7
