@@ -1,0 +1,155 @@
+name: Final open LCA recovery
+
+on:
+  push:
+    paths:
+      - '.github/workflows/lca-final-recovery.yml'
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: python -m pip install --quiet requests beautifulsoup4 pypdf
+      - name: Recover open copies
+        shell: bash
+        run: |
+          cat > /tmp/recover.py <<'PY'
+          import re, html, json, hashlib, time
+          from pathlib import Path
+          from urllib.parse import urljoin
+          import requests
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+
+          out=Path("final_recovery")
+          pdfdir=out/"reports"; pdfdir.mkdir(parents=True,exist_ok=True)
+          s=requests.Session()
+          s.headers.update({
+              "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+              "Accept":"text/html,application/pdf,*/*;q=0.8",
+              "Accept-Language":"en-US,en;q=0.9",
+          })
+          manifest=[]
+
+          rg={
+            "W07":"https://www.researchgate.net/publication/305801682_Climate_change_mitigation_potential_of_local_use_of_harvest_residues_for_bioenergy_in_Canada",
+            "W39":"https://www.researchgate.net/publication/369244123_Diverting_residual_biomass_to_energy_use_Quantifying_the_global_warming_potential_of_biogenic_CO_2_GWP_bCO2",
+            "W41":"https://www.researchgate.net/publication/377530614_Soil_organic_carbon_change_can_reduce_the_climate_benefits_of_biofuel_produced_from_forest_residues",
+            "W45":"https://www.researchgate.net/publication/276074355_Forest_Biomass_Energy_Assessing_Atmospheric_Carbon_Impacts_by_Discounting_Future_Carbon_Flows",
+            "W52":"https://www.researchgate.net/publication/391804775_Assessing_GHG_Emissions_Implications_of_Forest_Residue_Use_for_Energy_Production",
+          }
+
+          explicit={
+            "W07":[
+              "https://www.researchgate.net/publication/305801682_Climate_change_mitigation_potential_of_local_use_of_harvest_residues_for_bioenergy_in_Canada/fulltext/581bd9da08ae40da2ca923ff/Climate-change-mitigation-potential-of-local-use-of-harvest-residues-for-bioenergy-in-Canada.pdf"
+            ],
+            "W45":[
+              "https://www.researchgate.net/publication/276074355_Forest_Biomass_Energy_Assessing_Atmospheric_Carbon_Impacts_by_Discounting_Future_Carbon_Flows/fulltext/5812f46408ae29942f3e9944/Forest-Biomass-Energy-Assessing-Atmospheric-Carbon-Impacts-by-Discounting-Future-Carbon-Flows.pdf"
+            ],
+            "W18":[
+              "https://ageconsearch.umn.edu/record/150293/files/Baker%20et%20al_AAEA%202013_A%20multi-sector%20intertemporal%20optimization%20approach%20to%20assess%20the%20GHG%20implications%20of%20U.S.%20forest%20and%20agricultural%20biomass%20electricity%20expansion.pdf?download=1",
+              "https://ageconsearch.umn.edu/record/150293/files/Baker%20et%20al_AAEA%202013_A%20multi-sector%20intertemporal%20optimization%20approach%20to%20assess%20the%20GHG%20implications%20of%20U.S.%20forest%20and%20agricultural%20biomass%20electricity%20expansion.pdf"
+            ],
+            "W43":[
+              "https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/bin/nihms1561041.pdf",
+              "https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/bin/NIHMS1561041-supplement.pdf",
+              "https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/pdf/nihms1561041.pdf",
+              "https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/pdf/main.pdf"
+            ],
+            "W31":[
+              "https://digitalcommons.mtu.edu/cgi/viewcontent.cgi?article=1046&context=materials_fp"
+            ],
+          }
+
+          def save(rid,b,url,method):
+              if not (len(b)>5000 and b[:5]==b"%PDF-"): return None
+              p=pdfdir/f"{rid}.pdf"; p.write_bytes(b)
+              try: pages=len(PdfReader(str(p),strict=False).pages)
+              except Exception:
+                  p.unlink(missing_ok=True); return None
+              return {"id":rid,"status":"DOWNLOADED","file":p.name,"pages":pages,"bytes":len(b),
+                      "sha256":hashlib.sha256(b).hexdigest(),"source_url":url,"method":method}
+
+          def get_pdf(rid,url,method,referer=None):
+              try:
+                  h={}
+                  if referer: h["Referer"]=referer
+                  r=s.get(url,headers=h,timeout=120,allow_redirects=True)
+                  got=save(rid,r.content,r.url,method)
+                  if got: return got
+                  print("fail",rid,r.status_code,r.headers.get("content-type"),r.url,flush=True)
+              except Exception as e: print("err",rid,url,e,flush=True)
+              return None
+
+          def discover_rg(rid,pageurl):
+              urls=[]
+              try:
+                  r=s.get(pageurl,timeout=90,allow_redirects=True)
+                  txt=html.unescape(r.text).replace("\\u002F","/").replace("\\/","/")
+                  soup=BeautifulSoup(txt,"html.parser")
+                  for a in soup.find_all("a",href=True):
+                      u=urljoin(r.url,a["href"])
+                      if ".pdf" in u.lower() and ("fulltext" in u.lower() or "researchgate" in u.lower()):
+                          urls.append(u)
+                  for pat in [
+                      r'https?://[^"\'<> ]+/fulltext/[^"\'<> ]+\.pdf(?:\?[^"\'<> ]*)?',
+                      r'https?://[^"\'<> ]+\.pdf(?:\?[^"\'<> ]*)?'
+                  ]:
+                      urls += re.findall(pat,txt)
+                  # quoted slash-escaped URLs can still remain
+                  urls=[u.replace("&amp;","&") for u in urls]
+              except Exception as e:
+                  print("RG page fail",rid,e,flush=True)
+              seen=set()
+              return [u for u in urls if not (u in seen or seen.add(u))][:30]
+
+          ids=sorted(set(explicit)|set(rg))
+          for rid in ids:
+              print("###",rid,flush=True)
+              got=None
+              for u in explicit.get(rid,[]):
+                  got=get_pdf(rid,u,"explicit public/open link",rg.get(rid))
+                  if got: break
+              if not got and rid in rg:
+                  for u in discover_rg(rid,rg[rid]):
+                      got=get_pdf(rid,u,"ResearchGate author/open full-text",rg[rid])
+                      if got: break
+              if not got and rid=="W43":
+                  # parse PMC HTML for actual PDF href
+                  try:
+                      rr=s.get("https://pmc.ncbi.nlm.nih.gov/articles/PMC7065381/",timeout=90)
+                      soup=BeautifulSoup(rr.text,"html.parser")
+                      for a in soup.find_all("a",href=True):
+                          u=urljoin(rr.url,a["href"])
+                          if ".pdf" in u.lower():
+                              got=get_pdf(rid,u,"PMC author manuscript",rr.url)
+                              if got: break
+                  except Exception as e: print("PMC parse",e,flush=True)
+              if got:
+                  manifest.append(got)
+                  print("SUCCESS",rid,got["pages"],got["source_url"],flush=True)
+              else:
+                  manifest.append({"id":rid,"status":"FAILED"})
+                  print("FAILED",rid,flush=True)
+
+          (out/"manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
+          import csv
+          with open(out/"manifest.csv","w",newline="",encoding="utf-8") as f:
+              w=csv.DictWriter(f,fieldnames=["id","status","file","pages","bytes","sha256","source_url","method"],extrasaction="ignore")
+              w.writeheader();w.writerows(manifest)
+          print("TOTAL",sum(x["status"]=="DOWNLOADED" for x in manifest),flush=True)
+          PY
+          python /tmp/recover.py
+      - name: Package
+        run: |
+          cd final_recovery
+          zip -9 -r ../final_recovery.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LCA-Final-Recovery
+          path: final_recovery.zip
+          retention-days: 7
